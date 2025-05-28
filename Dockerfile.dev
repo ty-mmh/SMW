@@ -1,0 +1,26 @@
+# M1 Mac対応のNode.js
+FROM node:18-alpine
+
+# 作業ディレクトリ設定
+WORKDIR /app
+
+# 必要なツールをインストール
+RUN apk add --no-cache sqlite
+
+# パッケージファイルをコピー
+COPY package*.json ./
+
+# 依存関係インストール（package-lock.jsonがない場合はnpm install使用）
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+# アプリケーションファイルをコピー
+COPY . .
+
+# データディレクトリ作成
+RUN mkdir -p data
+
+# 開発用ポート公開
+EXPOSE 3000 9229
+
+# 開発サーバー起動コマンド
+CMD ["npm", "run", "dev"]

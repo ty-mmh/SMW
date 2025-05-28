@@ -1,0 +1,35 @@
+services:
+  # Node.js アプリケーション
+  app:
+    build: 
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3000:3000"
+      - "9229:9229"  # デバッグポート
+    volumes:
+      - .:/app
+      - /app/node_modules
+    environment:
+      - NODE_ENV=development
+      - DATABASE_URL=file:./data/secure-chat.db
+      - JWT_SECRET=dev-secret-key-change-in-production
+    depends_on:
+      db-setup:
+        condition: service_completed_successfully
+    command: npm run dev
+
+  # データベース初期化用
+  db-setup:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ./data:/app/data
+      - .:/app
+    environment:
+      - DATABASE_URL=file:./data/secure-chat.db
+    command: npm run db:setup
+
+volumes:
+  node_modules:
