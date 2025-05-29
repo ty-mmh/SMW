@@ -1,20 +1,25 @@
 {
   "name": "secure-chat",
   "version": "1.0.0",
-  "description": "Secure Chat Application with Signal Protocol",
+  "description": "Secure Chat Application with E2EE",
   "main": "server.js",
   "scripts": {
-    "dev": "nodemon --inspect=0.0.0.0:9229 server.js || node --inspect=0.0.0.0:9229 server.js",
+    "dev": "nodemon --inspect=0.0.0.0:9229 server.js",
     "start": "node server.js",
     "db:setup": "node scripts/setup-database.js",
     "db:migrate": "node scripts/migrate.js",
+    "db:reset": "rm -f data/secure-chat.db && npm run db:setup",
     "test": "jest",
-    "test:watch": "jest --watch"
+    "test:watch": "jest --watch",
+    "build": "echo 'No build step required for this project'",
+    "docker:build": "docker-compose build --no-cache",
+    "docker:up": "docker-compose up --build",
+    "docker:down": "docker-compose down -v"
   },
   "dependencies": {
     "express": "^4.18.2",
     "socket.io": "^4.7.5",
-    "sqlite3": "^5.1.6",
+    "better-sqlite3": "^9.2.0",
     "bcryptjs": "^2.4.3",
     "jsonwebtoken": "^9.0.2",
     "helmet": "^7.1.0",
@@ -31,5 +36,17 @@
   },
   "engines": {
     "node": ">=18.0.0"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "private"
+  },
+  "keywords": [
+    "secure-chat",
+    "e2ee",
+    "websocket",
+    "sqlite"
+  ],
+  "author": "Your Name",
+  "license": "MIT"
 }

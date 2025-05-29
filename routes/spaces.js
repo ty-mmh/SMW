@@ -49,7 +49,7 @@ module.exports = (db) => {
       // 最終アクティビティ更新
       const updateResult = db.prepare(`
         UPDATE spaces 
-        SET last_activity_at = CURRENT_TIMESTAMP 
+        SET last_activity_at = datetime('now') 
         WHERE id = ?
       `).run(space.id);
 
@@ -177,7 +177,7 @@ module.exports = (db) => {
       // メッセージ数を取得
       const messageCount = db.prepare(`
         SELECT COUNT(*) as count FROM messages 
-        WHERE space_id = ? AND is_deleted = FALSE
+        WHERE space_id = ? AND is_deleted = 0
       `).get(spaceId);
 
       const responseSpace = {
@@ -217,7 +217,7 @@ module.exports = (db) => {
                COUNT(m.id) as message_count,
                MAX(m.timestamp) as last_message_at
         FROM spaces s
-        LEFT JOIN messages m ON s.id = m.space_id AND m.is_deleted = FALSE
+        LEFT JOIN messages m ON s.id = m.space_id AND m.is_deleted = 0
         GROUP BY s.id
         ORDER BY s.last_activity_at DESC
         LIMIT 50

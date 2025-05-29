@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
-const Database = require('sqlite3').verbose();
+const Database = require('better-sqlite3');
 const path = require('path');
 const helmet = require('helmet');
 const cors = require('cors');
@@ -19,18 +19,19 @@ const io = socketIo(server, {
   }
 });
 
-// データベース接続
+// データベース接続（better-sqlite3を使用）
 const dbPath = process.env.DATABASE_URL?.replace('file:', '') || './data/secure-chat.db';
 let db;
 
 try {
-  db = new Database.Database(dbPath, (err) => {
-    if (err) {
-      console.error('❌ データベース接続エラー:', err);
-      process.exit(1);
-    }
-    console.log('✅ データベース接続成功:', dbPath);
-  });
+  console.log(`🗄️ データベース接続中: ${dbPath}`);
+  db = new Database(dbPath);
+  
+  // WALモード有効化（パフォーマンス向上）
+  db.pragma('journal_mode = WAL');
+  db.pragma('foreign_keys = ON');
+  
+  console.log('✅ データベース接続成功');
   
 } catch (error) {
   console.error('❌ データベース接続エラー:', error);
@@ -59,22 +60,15 @@ app.use('/api/messages', require('./routes/messages')(db));
 app.get('/health', (req, res) => {
   try {
     // データベース接続テスト
-    db.get('SELECT 1 as test', (err, result) => {
-      if (err) {
-        res.status(500).json({
-          status: 'ERROR',
-          timestamp: new Date().toISOString(),
-          error: err.message
-        });
-      } else {
-        res.json({ 
-          status: 'OK',
-          timestamp: new Date().toISOString(),
-          environment: process.env.NODE_ENV || 'development',
-          database: result ? 'Connected' : 'Disconnected',
-          version: process.env.npm_package_version || '1.0.0'
-        });
-      }
+    const result = db.prepare('SELECT 1 as test').get();
+    
+    res.json({ 
+      status: 'OK',
+      timestamp: new Date().toISOString(),
+      environment: process.env.NODE_ENV || 'development',
+      database: result ? 'Connected' : 'Disconnected',
+      version: process.env.npm_package_version || '1.0.0',
+      dbPath: dbPath.replace(process.cwd(), '.')
     });
   } catch (error) {
     res.status(500).json({
@@ -88,32 +82,20 @@ app.get('/health', (req, res) => {
 // API統計情報
 app.get('/api/stats', (req, res) => {
   try {
-    db.get('SELECT COUNT(*) as count FROM spaces', (err, spacesCount) => {
-      if (err) {
-        return res.status(500).json({ success: false, error: err.message });
-      }
-      
-      db.get('SELECT COUNT(*) as count FROM messages WHERE is_deleted = 0', (err, messagesCount) => {
-        if (err) {
-          return res.status(500).json({ success: false, error: err.message });
-        }
-        
-        db.get(`SELECT COUNT(*) as count FROM spaces WHERE last_activity_at > datetime('now', '-24 hours')`, (err, activeSpaces) => {
-          if (err) {
-            return res.status(500).json({ success: false, error: err.message });
-          }
-          
-          res.json({
-            success: true,
-            stats: {
-              totalSpaces: spacesCount.count,
-              activeSpaces: activeSpaces.count,
-              totalMessages: messagesCount.count,
-              uptime: process.uptime()
-            }
-          });
-        });
-      });
+    const spacesCount = db.prepare('SELECT COUNT(*) as count FROM spaces').get();
+    const messagesCount = db.prepare('SELECT COUNT(*) as count FROM messages WHERE is_deleted = 0').get();
+    const activeSpaces = db.prepare(`SELECT COUNT(*) as count FROM spaces WHERE last_activity_at > datetime('now', '-24 hours')`).get();
+    
+    res.json({
+      success: true,
+      stats: {
+        totalSpaces: spacesCount.count,
+        activeSpaces: activeSpaces.count,
+        totalMessages: messagesCount.count,
+        uptime: process.uptime(),
+        dbSize: require('fs').statSync(dbPath).size
+      },
+      timestamp: new Date().toISOString()
     });
   } catch (error) {
     res.status(500).json({
@@ -124,7 +106,7 @@ app.get('/api/stats', (req, res) => {
 });
 
 // Socket.IO接続処理
-const connectedUsers = new Map(); // 接続中ユーザー管理
+const connectedUsers = new Map();
 
 io.on('connection', (socket) => {
   console.log(`🔌 ユーザー接続: ${socket.id}`);
@@ -184,15 +166,12 @@ io.on('connection', (socket) => {
     
     const userInfo = connectedUsers.get(socket.id);
     if (userInfo) {
-      // 空間の参加者数更新
       const roomSize = io.sockets.adapter.rooms.get(userInfo.spaceId)?.size || 0;
       io.to(userInfo.spaceId).emit('room-info', { userCount: roomSize });
-      
       connectedUsers.delete(socket.id);
     }
   });
   
-  // エラーハンドリング
   socket.on('error', (error) => {
     console.error(`🐛 Socket.IOエラー (${socket.id}):`, error);
   });
@@ -201,36 +180,21 @@ io.on('connection', (socket) => {
 // メッセージクリーンアップ処理（1分ごと）
 const cleanupExpiredMessages = () => {
   try {
-    db.run(`
+    const result = db.prepare(`
       UPDATE messages 
       SET is_deleted = 1 
       WHERE expires_at <= datetime('now') AND is_deleted = 0
-    `, function(err) {
-      if (err) {
-        console.error('❌ メッセージクリーンアップエラー:', err);
-      } else if (this.changes > 0) {
-        console.log(`🗑️ 期限切れメッセージを削除: ${this.changes}件`);
-      }
-    });
+    `).run();
+    
+    if (result.changes > 0) {
+      console.log(`🗑️ 期限切れメッセージを削除: ${result.changes}件`);
+    }
   } catch (error) {
     console.error('❌ メッセージクリーンアップエラー:', error);
   }
 };
 
-// 定期クリーンアップ開始
 const cleanupInterval = setInterval(cleanupExpiredMessages, 60000);
-
-// デバッグ情報表示（開発環境のみ）
-if (process.env.NODE_ENV !== 'production') {
-  setInterval(() => {
-    const connections = connectedUsers.size;
-    const rooms = io.sockets.adapter.rooms.size;
-    
-    if (connections > 0) {
-      console.log(`📊 接続状況: ${connections}人接続中, ${rooms}個の空間がアクティブ`);
-    }
-  }, 30000);
-}
 
 // 404ハンドラー
 app.use('*', (req, res) => {
@@ -263,21 +227,10 @@ server.listen(PORT, HOST, () => {
   console.log(`🗄️ データベース: ${dbPath}`);
   console.log(`⏰ 起動時刻: ${new Date().toLocaleString('ja-JP')}`);
   
-  // 初期データ確認
   try {
-    db.get('SELECT COUNT(*) as count FROM spaces', (err, spacesCount) => {
-      if (err) {
-        console.warn('⚠️ データベース状況取得に失敗:', err.message);
-      } else {
-        db.get('SELECT COUNT(*) as count FROM messages WHERE is_deleted = 0', (err, messagesCount) => {
-          if (err) {
-            console.warn('⚠️ データベース状況取得に失敗:', err.message);
-          } else {
-            console.log(`📋 データベース状況: ${spacesCount.count}個の空間, ${messagesCount.count}件のメッセージ`);
-          }
-        });
-      }
-    });
+    const spacesCount = db.prepare('SELECT COUNT(*) as count FROM spaces').get();
+    const messagesCount = db.prepare('SELECT COUNT(*) as count FROM messages WHERE is_deleted = 0').get();
+    console.log(`📋 データベース状況: ${spacesCount.count}個の空間, ${messagesCount.count}件のメッセージ`);
   } catch (error) {
     console.warn('⚠️ データベース状況取得に失敗:', error.message);
   }
@@ -287,9 +240,8 @@ server.listen(PORT, HOST, () => {
 
 // グレースフルシャットダウン
 const gracefulShutdown = (signal) => {
-  console.log(`\n🛑 ${signal} を受信しました。サーバーを停止しています...`);
+  console.log(`\n🛑 ${signal} を受信。サーバーを停止中...`);
   
-  // 新しい接続を拒否
   server.close((err) => {
     if (err) {
       console.error('❌ サーバー停止エラー:', err);
@@ -298,47 +250,32 @@ const gracefulShutdown = (signal) => {
     
     console.log('✅ サーバーが正常に停止しました');
     
-    // クリーンアップ処理
     clearInterval(cleanupInterval);
     
-    // データベース接続を閉じる
     if (db) {
       try {
-        db.close((err) => {
-          if (err) {
-            console.error('❌ データベース切断エラー:', err);
-          } else {
-            console.log('✅ データベース接続を閉じました');
-          }
-          process.exit(0);
-        });
+        db.close();
+        console.log('✅ データベース接続を閉じました');
       } catch (error) {
         console.error('❌ データベース切断エラー:', error);
-        process.exit(1);
       }
-    } else {
-      process.exit(0);
     }
     
-    // Socket.IO接続を閉じる
     io.close(() => {
       console.log('✅ WebSocket接続を閉じました');
       process.exit(0);
     });
   });
   
-  // 強制終了タイマー（30秒）
   setTimeout(() => {
-    console.error('❌ グレースフルシャットダウンがタイムアウトしました');
+    console.error('❌ シャットダウンタイムアウト');
     process.exit(1);
   }, 30000);
 };
 
-// シグナルハンドラー登録
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-// 未処理エラーをキャッチ
 process.on('uncaughtException', (error) => {
   console.error('🔥 未処理例外:', error);
   gracefulShutdown('UNCAUGHT_EXCEPTION');
@@ -346,7 +283,6 @@ process.on('uncaughtException', (error) => {
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('🔥 未処理Promise拒否:', reason);
-  console.error('Promise:', promise);
   gracefulShutdown('UNHANDLED_REJECTION');
 });
 

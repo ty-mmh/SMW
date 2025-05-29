@@ -1,24 +1,29 @@
-# M1 Mac対応のNode.js（軽量版）
-FROM node:18-alpine
+# M1 Mac + better-sqlite3 対応 Dockerfile
+FROM node:18-slim
+
+# 必要なシステムパッケージをインストール（Alpine使用を止めてDebian slimに変更）
+RUN apt-get update && apt-get install -y \
+    python3 \
+    make \
+    g++ \
+    sqlite3 \
+    libsqlite3-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 # 作業ディレクトリ設定
 WORKDIR /app
 
-# 必要なツールをインストール（sqlite3用）
-RUN apk add --no-cache \
-    sqlite \
-    python3 \
-    make \
-    g++
-
-# パッケージファイルをコピー
+# パッケージファイルを先にコピー（キャッシュ効率化）
 COPY package*.json ./
 
-# npm キャッシュクリア
+# npmキャッシュクリア
 RUN npm cache clean --force
 
-# 依存関係インストール（開発用も含む）
-RUN npm install
+# better-sqlite3用の環境変数設定
+ENV PYTHON=/usr/bin/python3
+
+# 依存関係インストール
+RUN npm install --verbose
 
 # アプリケーションファイルをコピー
 COPY . .
@@ -26,8 +31,12 @@ COPY . .
 # データディレクトリ作成
 RUN mkdir -p data utils
 
+# 権限設定
+RUN chmod -R 755 /app
+RUN chmod -R 777 /app/data
+
 # 開発用ポート公開
 EXPOSE 3000 9229
 
-# 開発サーバー起動コマンド
+# 開発サーバー起動
 CMD ["npm", "run", "dev"]
