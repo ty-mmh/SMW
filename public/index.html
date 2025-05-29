@@ -4,18 +4,110 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>セキュアチャット - 開発版</title>
-    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
-    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <meta name="description" content="合言葉で守られたプライベートチャット空間">
+    
+    <!-- React Development -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- Socket.IO -->
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    
+    <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+    
+    <style>
+        /* カスタムスタイル */
+        .glass-effect {
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+        }
+        
+        /* スクロールバーカスタマイズ */
+        ::-webkit-scrollbar {
+            width: 6px;
+        }
+        
+        ::-webkit-scrollbar-track {
+            background: rgba(55, 65, 81, 0.3);
+            border-radius: 3px;
+        }
+        
+        ::-webkit-scrollbar-thumb {
+            background: rgba(156, 163, 175, 0.5);
+            border-radius: 3px;
+        }
+        
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(156, 163, 175, 0.7);
+        }
+        
+        /* テキストエリアのリサイズ無効化 */
+        textarea {
+            resize: none;
+        }
+        
+        /* フォーカス時のアウトライン調整 */
+        input:focus, textarea:focus, button:focus {
+            outline: none;
+        }
+    </style>
 </head>
-<body>
+<body class="bg-gray-900 text-white">
     <div id="root"></div>
+    
+    <!-- 設定スクリプト -->
     <script>
         // 開発環境用の設定
         window.API_BASE = 'http://localhost:3000/api';
         window.SOCKET_URL = 'http://localhost:3000';
+        
+        // Tailwind設定
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    animation: {
+                        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                    }
+                }
+            }
+        };
+        
+        console.log('🚀 セキュアチャット開発版が読み込まれました');
+        console.log('📡 API Base:', window.API_BASE);
+        console.log('🔌 WebSocket URL:', window.SOCKET_URL);
     </script>
+    
+    <!-- モジュール読み込み -->
+    <script src="/js/modules/icons.js"></script>
+    <script src="/js/modules/api.js"></script>
+    <script src="/js/modules/utils.js"></script>
+    <script src="/js/components/Login.js"></script>
+    <script src="/js/components/Chat.js"></script>
+    
+    <!-- メインアプリケーション -->
     <script src="/js/app.js"></script>
+    
+    <!-- 開発用デバッグ情報 -->
+    <script>
+        if (typeof React === 'undefined') {
+            console.error('❌ React が読み込まれていません');
+            document.getElementById('root').innerHTML = 
+                '<div style="color: red; text-align: center; margin-top: 50px;">React の読み込みに失敗しました</div>';
+        }
+        
+        // エラーハンドリング
+        window.addEventListener('error', (e) => {
+            console.error('🐛 JavaScript エラー:', e.error);
+        });
+        
+        window.addEventListener('unhandledrejection', (e) => {
+            console.error('🐛 Promise エラー:', e.reason);
+        });
+    </script>
 </body>
 </html>

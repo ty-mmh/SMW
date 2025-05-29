@@ -1,0 +1,64 @@
+# Node.js関連
+node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 依存関係キャッシュ
+.npm
+.yarn
+
+# ビルド成果物
+build/
+dist/
+.next/
+
+# ログファイル
+*.log
+logs/
+
+# 環境設定ファイル
+.env
+.env.local
+.env.production
+.env.development
+.env.*.local
+
+# データベースファイル
+*.db
+*.db-journal
+data/
+
+# IDE/エディタ設定
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS生成ファイル
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Git関連
+.git
+.gitignore
+
+# Docker関連
+.dockerignore
+Dockerfile*
+docker-compose*.yml
+
+# テスト関連
+coverage/
+.nyc_output/
+
+# その他
+README.md
+LICENSE
+*.md

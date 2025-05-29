@@ -9,7 +9,7 @@ services:
       - "9229:9229"  # デバッグポート
     volumes:
       - .:/app
-      - /app/node_modules
+      - node_modules:/app/node_modules
     environment:
       - NODE_ENV=development
       - DATABASE_URL=file:./data/secure-chat.db
@@ -17,7 +17,9 @@ services:
     depends_on:
       db-setup:
         condition: service_completed_successfully
-    command: npm run dev
+    # nodemonの代わりにnodeを直接使用
+    command: node --inspect=0.0.0.0:9229 server.js
+    restart: unless-stopped
 
   # データベース初期化用
   db-setup:
@@ -27,6 +29,7 @@ services:
     volumes:
       - ./data:/app/data
       - .:/app
+      - node_modules:/app/node_modules
     environment:
       - DATABASE_URL=file:./data/secure-chat.db
     command: npm run db:setup
