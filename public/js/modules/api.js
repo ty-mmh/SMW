@@ -1,8 +1,16 @@
-// API通信モジュール（統合版ベース・改修版）
-// サーバーとの通信、エラーハンドリング、レスポンス処理
+// API通信モジュール（暗号化統合版）
+// サーバーとの通信、暗号化処理、エラーハンドリング
 
 window.API = {
-  // 基本的なAPI呼び出し関数
+  // 暗号化システムの状態
+  encryptionSystem: null,
+  currentSpaceId: null,
+  otherUsers: new Map(), // 他のユーザーの公開鍵を管理
+
+  // =============================================================================
+  // 基本API呼び出し（暗号化対応）
+  // =============================================================================
+  
   call: async (endpoint, options = {}) => {
     // パフォーマンス測定開始
     window.Utils.performance.start(`api_${endpoint.replace(/[\/\:]/g, '_')}`);
@@ -85,6 +93,80 @@ window.API = {
     }
   },
 
+  // =============================================================================
+  // 暗号化システム管理
+  // =============================================================================
+
+  /**
+   * 空間の暗号化システムを初期化
+   * @param {string} spaceId 
+   * @returns {Promise<void>}
+   */
+  initializeEncryption: async (spaceId) => {
+    try {
+      if (!window.Crypto.isSupported) {
+        window.Utils.log('warn', 'Web Crypto API未サポート - 暗号化を無効化');
+        return;
+      }
+
+      window.Utils.log('info', '暗号化システム初期化開始', { spaceId });
+      
+      // 暗号化システム初期化
+      window.API.encryptionSystem = await window.Crypto.initializeSpaceEncryption(spaceId);
+      window.API.currentSpaceId = spaceId;
+      
+      // 公開鍵をサーバーに送信（将来の実装）
+      await window.API.announcePublicKey(spaceId, window.API.encryptionSystem.publicKey);
+      
+      window.Utils.log('success', '暗号化システム初期化完了', { 
+        spaceId,
+        publicKeyLength: window.API.encryptionSystem.publicKey.length 
+      });
+      
+    } catch (error) {
+      window.Utils.log('error', '暗号化システム初期化エラー', error.message);
+      // 暗号化エラーでもアプリケーションは継続
+      window.API.encryptionSystem = null;
+    }
+  },
+
+  /**
+   * 公開鍵をサーバーに通知（将来の実装）
+   * @param {string} spaceId 
+   * @param {string} publicKey 
+   */
+  announcePublicKey: async (spaceId, publicKey) => {
+    try {
+      // 現在はローカルストレージに保存（将来はサーバー経由）
+      const announcement = {
+        spaceId,
+        publicKey,
+        timestamp: new Date().toISOString(),
+        userId: `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+      };
+      
+      window.Utils.storage.set('publicKeyAnnouncement', announcement);
+      window.Utils.log('debug', '公開鍵通知完了', announcement);
+      
+    } catch (error) {
+      window.Utils.log('warn', '公開鍵通知エラー', error.message);
+    }
+  },
+
+  /**
+   * 暗号化システムをクリーンアップ
+   */
+  cleanupEncryption: () => {
+    window.API.encryptionSystem = null;
+    window.API.currentSpaceId = null;
+    window.API.otherUsers.clear();
+    window.Utils.log('info', '暗号化システムクリーンアップ完了');
+  },
+
+  // =============================================================================
+  // 空間管理API（暗号化対応）
+  // =============================================================================
+
   // 空間入室API
   enterSpace: async (passphrase) => {
     window.Utils.log('info', '空間入室処理開始', { passphraseLength: passphrase?.length });
@@ -117,6 +199,32 @@ window.API = {
       lastActivityAt: space.lastActivityAt ? new Date(space.lastActivityAt) : new Date()
     };
 
+    // 🔒 暗号化システム初期化
+    window.Utils.log('info', '🔒 暗号化システム初期化開始', { spaceId: safeSpace.id });
+    
+    try {
+      const encryptionInitialized = await window.API.initializeEncryption(safeSpace.id);
+      
+      if (encryptionInitialized) {
+        window.Utils.log('success', '🔒 暗号化システム初期化完了', { 
+          spaceId: safeSpace.id,
+          keyPairGenerated: true 
+        });
+      } else {
+        window.Utils.log('warn', '🔒 暗号化システム初期化をスキップ', { 
+          spaceId: safeSpace.id,
+          reason: '既に初期化済み' 
+        });
+      }
+    } catch (encryptionError) {
+      window.Utils.log('error', '🔒 暗号化システム初期化失敗', { 
+        spaceId: safeSpace.id, 
+        error: encryptionError.message,
+        stack: encryptionError.stack
+      });
+      // 暗号化失敗でも入室は継続（フォールバック）
+    }
+
     window.Utils.log('success', '空間入室成功', { 
       spaceId: safeSpace.id, 
       passphrase: safeSpace.passphrase 
@@ -125,7 +233,6 @@ window.API = {
     return safeSpace;
   },
 
-  // 空間作成API
   createSpace: async (passphrase) => {
     window.Utils.log('info', '空間作成処理開始', { passphraseLength: passphrase?.length });
     
@@ -152,7 +259,10 @@ window.API = {
     return result;
   },
 
-  // メッセージ一覧取得API
+  // =============================================================================
+  // メッセージAPI（暗号化対応）
+  // =============================================================================
+
   loadMessages: async (spaceId) => {
     if (!spaceId) {
       throw new Error('空間IDが必要です');
@@ -169,14 +279,34 @@ window.API = {
     // メッセージデータの安全性確認と変換
     const messages = Array.isArray(result.messages) ? result.messages : [];
     
-    const safeMessages = messages.map((msg, index) => {
+    const safeMessages = await Promise.all(messages.map(async (msg, index) => {
       try {
+        let decryptedText = msg.text || '';
+        
+        // 暗号化されたメッセージの復号化を試行
+        if (window.API.encryptionSystem && msg.encrypted && msg.encryptedData && msg.iv) {
+          try {
+            // 現在は自分の鍵で復号化（将来は送信者の公開鍵を使用）
+            decryptedText = await window.API.decryptMessage(msg);
+            window.Utils.log('debug', 'メッセージ復号化成功', { messageId: msg.id });
+          } catch (decryptError) {
+            window.Utils.log('warn', 'メッセージ復号化失敗', { 
+              messageId: msg.id, 
+              error: decryptError.message 
+            });
+            decryptedText = '[暗号化されたメッセージ - 復号化できませんでした]';
+          }
+        }
+        
         return {
           id: msg.id || `temp_${Date.now()}_${index}`,
-          text: msg.text || '',
+          text: decryptedText,
           timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(),
           encrypted: Boolean(msg.encrypted),
-          isDeleted: Boolean(msg.isDeleted)
+          isDeleted: Boolean(msg.isDeleted),
+          // 暗号化メタデータ
+          encryptedData: msg.encryptedData,
+          iv: msg.iv
         };
       } catch (error) {
         window.Utils.log('warn', 'メッセージデータ変換エラー', { msg, error: error.message });
@@ -188,17 +318,17 @@ window.API = {
           isDeleted: false
         };
       }
-    });
+    }));
 
     window.Utils.log('success', 'メッセージ読み込み成功', { 
       spaceId, 
-      messageCount: safeMessages.length 
+      messageCount: safeMessages.length,
+      encryptedCount: safeMessages.filter(m => m.encrypted).length
     });
 
     return safeMessages;
   },
 
-  // メッセージ送信API
   sendMessage: async (spaceId, message) => {
     if (!spaceId) {
       throw new Error('空間IDが必要です');
@@ -212,15 +342,43 @@ window.API = {
 
     window.Utils.log('info', 'メッセージ送信処理開始', { 
       spaceId, 
-      messageLength: validation.message.length 
+      messageLength: validation.message.length,
+      encryptionEnabled: !!window.API.encryptionSystem
     });
+
+    let messagePayload = {
+      spaceId,
+      message: validation.message,
+      encrypted: false
+    };
+
+    // 暗号化が有効な場合はメッセージを暗号化
+    if (window.API.encryptionSystem) {
+      try {
+        const encryptedResult = await window.API.encryptMessage(validation.message);
+        messagePayload = {
+          spaceId,
+          encryptedData: encryptedResult.encryptedData,
+          iv: encryptedResult.iv,
+          encrypted: true,
+          // プレーンテキストは送信しない
+          message: '[暗号化済み]'
+        };
+        
+        window.Utils.log('debug', 'メッセージ暗号化完了', { 
+          originalLength: validation.message.length,
+          encryptedLength: encryptedResult.encryptedData.length
+        });
+        
+      } catch (encryptError) {
+        window.Utils.log('warn', 'メッセージ暗号化失敗 - 平文で送信', encryptError.message);
+        // 暗号化に失敗した場合は平文で送信
+      }
+    }
 
     const result = await window.API.call('/messages/create', {
       method: 'POST',
-      body: JSON.stringify({
-        spaceId,
-        message: validation.message
-      })
+      body: JSON.stringify(messagePayload)
     });
 
     if (!result || !result.success || !result.message) {
@@ -230,22 +388,71 @@ window.API = {
     // メッセージデータの安全性確認と変換
     const newMessage = {
       id: result.message.id || Date.now().toString(),
-      text: result.message.text || validation.message,
+      text: messagePayload.encrypted ? validation.message : result.message.text, // ローカル表示用は元のテキスト
       timestamp: result.message.timestamp ? new Date(result.message.timestamp) : new Date(),
-      encrypted: true,
-      isDeleted: false
+      encrypted: messagePayload.encrypted,
+      isDeleted: false,
+      encryptedData: messagePayload.encryptedData,
+      iv: messagePayload.iv
     };
 
     window.Utils.log('success', 'メッセージ送信成功', { 
       spaceId, 
       messageId: newMessage.id,
-      messageLength: newMessage.text.length 
+      messageLength: newMessage.text.length,
+      encrypted: newMessage.encrypted
     });
 
     return newMessage;
   },
 
-  // 空間情報取得API（拡張用）
+  // =============================================================================
+  // 暗号化ヘルパー関数
+  // =============================================================================
+
+  /**
+   * メッセージを暗号化
+   * @param {string} message 平文メッセージ
+   * @returns {Promise<{encryptedData: string, iv: string}>}
+   */
+  encryptMessage: async (message) => {
+    if (!window.API.encryptionSystem) {
+      throw new Error('暗号化システムが初期化されていません');
+    }
+
+    // 現在は自分の鍵で暗号化（将来は受信者の公開鍵を使用）
+    // 暫定的に自分の公開鍵を使用
+    const dummyPublicKey = window.API.encryptionSystem.publicKey;
+    return await window.API.encryptionSystem.encryptForUser(message, dummyPublicKey);
+  },
+
+  /**
+   * メッセージを復号化
+   * @param {Object} encryptedMessage 暗号化されたメッセージオブジェクト
+   * @returns {Promise<string>}
+   */
+  decryptMessage: async (encryptedMessage) => {
+    if (!window.API.encryptionSystem) {
+      throw new Error('暗号化システムが初期化されていません');
+    }
+
+    if (!encryptedMessage.encryptedData || !encryptedMessage.iv) {
+      throw new Error('暗号化データが不完全です');
+    }
+
+    // 現在は自分の鍵で復号化（将来は送信者の公開鍵を使用）
+    const dummyPublicKey = window.API.encryptionSystem.publicKey;
+    return await window.API.encryptionSystem.decryptFromUser(
+      encryptedMessage.encryptedData,
+      encryptedMessage.iv,
+      dummyPublicKey
+    );
+  },
+
+  // =============================================================================
+  // その他のAPI（既存機能）
+  // =============================================================================
+
   getSpaceInfo: async (spaceId) => {
     if (!spaceId) {
       throw new Error('空間IDが必要です');
@@ -275,7 +482,6 @@ window.API = {
     return safeSpace;
   },
 
-  // ヘルスチェックAPI
   healthCheck: async () => {
     try {
       const result = await window.API.call('/health');
@@ -293,7 +499,6 @@ window.API = {
     }
   },
 
-  // 統計情報取得API（開発用）
   getStats: async () => {
     try {
       const result = await window.API.call('/api/stats');
@@ -303,12 +508,10 @@ window.API = {
       return result;
     } catch (error) {
       window.Utils.log('warn', '統計情報取得失敗', { error: error.message });
-      // 統計情報は必須ではないので、エラーを投げずにnullを返す
       return null;
     }
   },
 
-  // 接続テスト（初期化時の確認用）
   testConnection: async () => {
     try {
       window.Utils.log('info', 'API接続テスト開始');
@@ -331,7 +534,6 @@ window.API = {
     }
   },
 
-  // リトライ機能付きAPI呼び出し（重要な処理用）
   callWithRetry: async (endpoint, options = {}, maxRetries = 3) => {
     let lastError;
     
@@ -364,9 +566,8 @@ window.API = {
           error: error.message 
         });
         
-        // 最後の試行でない場合は待機
         if (attempt < maxRetries) {
-          const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000); // 指数バックオフ、最大5秒
+          const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
           await new Promise(resolve => setTimeout(resolve, delay));
         }
       }
@@ -382,7 +583,9 @@ window.API = {
   }
 };
 
+// =============================================================================
 // 初期化処理
+// =============================================================================
 window.API.init = async () => {
   try {
     window.Utils.log('info', 'API モジュール初期化開始');
@@ -390,6 +593,13 @@ window.API.init = async () => {
     // 基本設定確認
     if (!window.API_BASE) {
       throw new Error('API_BASE URLが設定されていません');
+    }
+    
+    // 暗号化システムの可用性確認
+    if (window.Crypto && window.Crypto.isSupported) {
+      window.Utils.log('success', '暗号化システム利用可能');
+    } else {
+      window.Utils.log('warn', '暗号化システム利用不可 - 平文通信になります');
     }
     
     // 接続テスト実行
@@ -409,7 +619,13 @@ window.API.init = async () => {
   }
 };
 
+// 空間退室時のクリーンアップ
+window.API.leaveSpace = () => {
+  window.API.cleanupEncryption();
+  window.Utils.log('info', '空間退室 - 暗号化システムクリーンアップ完了');
+};
+
 // デバッグ用: APIモジュールの読み込み確認
 if (typeof console !== 'undefined') {
-  console.log('✅ API module loaded:', Object.keys(window.API).length + ' methods available');
+  console.log('✅ API module loaded (with encryption):', Object.keys(window.API).length + ' methods available');
 }

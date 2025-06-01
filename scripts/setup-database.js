@@ -47,7 +47,7 @@ try {
   `);
   console.log('✅ spacesテーブルを作成しました');
   
-  // メッセージテーブル作成
+  // メッセージテーブル作成（暗号化対応）
   db.exec(`
     CREATE TABLE IF NOT EXISTS messages (
       id TEXT PRIMARY KEY,
@@ -56,10 +56,12 @@ try {
       timestamp TEXT DEFAULT (datetime('now')),
       expires_at TEXT NOT NULL,
       is_deleted INTEGER DEFAULT 0,
+      encrypted INTEGER DEFAULT 0,
+      encrypted_payload TEXT,
       FOREIGN KEY (space_id) REFERENCES spaces(id) ON DELETE CASCADE
     )
   `);
-  console.log('✅ messagesテーブルを作成しました');
+  console.log('✅ messagesテーブルを作成しました（暗号化対応）');
   
   // インデックス作成
   db.exec('CREATE INDEX IF NOT EXISTS idx_spaces_passphrase ON spaces(passphrase)');

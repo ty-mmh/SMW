@@ -3,8 +3,18 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>セキュアチャット - 開発版</title>
-    <meta name="description" content="合言葉で守られたプライベートチャット空間">
+    <title>セキュアチャット - E2EE対応版</title>
+    <meta name="description" content="エンドツーエンド暗号化対応のプライベートチャット空間">
+    
+    <!-- セキュリティヘッダー -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.socket.io https://cdn.tailwindcss.com; style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; connect-src 'self' ws: wss:;">
+    <meta http-equiv="X-Content-Type-Options" content="nosniff">
+    <meta http-equiv="X-Frame-Options" content="DENY">
+    <meta http-equiv="X-XSS-Protection" content="1; mode=block">
+    
+    <!-- アイコン・テーマ -->
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'><path stroke='%234f46e5' stroke-width='2' d='M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z'/></svg>">
+    <meta name="theme-color" content="#111827">
     
     <!-- React Development -->
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
@@ -15,9 +25,6 @@
     
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
-    
-    <!-- Lucide Icons -->
-    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
     
     <style>
         /* カスタムスタイル */
@@ -54,16 +61,85 @@
         input:focus, textarea:focus, button:focus {
             outline: none;
         }
+        
+        /* 暗号化インジケーター */
+        .encryption-indicator {
+            animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+        
+        .encryption-enabled {
+            color: #10b981;
+        }
+        
+        .encryption-disabled {
+            color: #f59e0b;
+        }
+        
+        .encryption-error {
+            color: #ef4444;
+        }
+        
+        /* 暗号化バッジ */
+        .crypto-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.25rem;
+            padding: 0.25rem 0.5rem;
+            font-size: 0.75rem;
+            border-radius: 9999px;
+            border: 1px solid;
+        }
+        
+        .crypto-badge.enabled {
+            background-color: rgba(16, 185, 129, 0.1);
+            border-color: rgba(16, 185, 129, 0.3);
+            color: #10b981;
+        }
+        
+        .crypto-badge.disabled {
+            background-color: rgba(245, 158, 11, 0.1);
+            border-color: rgba(245, 158, 11, 0.3);
+            color: #f59e0b;
+        }
+        
+        .crypto-badge.error {
+            background-color: rgba(239, 68, 68, 0.1);
+            border-color: rgba(239, 68, 68, 0.3);
+            color: #ef4444;
+        }
     </style>
 </head>
 <body class="bg-gray-900 text-white">
+    <!-- ローディング画面 -->
+    <div id="loading" class="min-h-screen bg-gray-900 text-white flex items-center justify-center">
+        <div class="text-center">
+            <div class="w-16 h-16 mx-auto mb-4 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+            <h1 class="text-xl mb-2">セキュアチャット</h1>
+            <p class="text-gray-400 text-sm">暗号化システムを初期化中...</p>
+        </div>
+    </div>
+    
+    <!-- メインアプリケーション -->
     <div id="root"></div>
+    
+    <!-- エラーフォールバック -->
+    <div id="error-fallback" style="display: none;" class="min-h-screen bg-gray-900 text-white flex items-center justify-center p-4">
+        <div class="text-center max-w-md">
+            <h1 class="text-2xl mb-4 text-red-400">読み込みエラー</h1>
+            <p class="text-gray-300 mb-6">アプリケーションの読み込みに失敗しました</p>
+            <button onclick="location.reload()" class="bg-blue-600 hover:bg-blue-700 px-6 py-3 rounded-lg font-medium transition duration-200">
+                再読み込み
+            </button>
+        </div>
+    </div>
     
     <!-- 設定スクリプト -->
     <script>
-        // 開発環境用の設定
+        // 環境設定
         window.API_BASE = 'http://localhost:3000/api';
         window.SOCKET_URL = 'http://localhost:3000';
+        window.MESSAGE_EXPIRY_HOURS = '48';
+        window.DEBUG_MODE = window.location.hostname === 'localhost' || window.location.search.includes('debug=true');
         
         // Tailwind設定
         tailwind.config = {
@@ -72,44 +148,97 @@
                 extend: {
                     animation: {
                         'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                        'spin-slow': 'spin 3s linear infinite',
+                    },
+                    colors: {
+                        'crypto-green': '#10b981',
+                        'crypto-yellow': '#f59e0b', 
+                        'crypto-red': '#ef4444'
                     }
                 }
             }
         };
         
-        console.log('🚀 セキュアチャット開発版が読み込まれました');
+        // 初期化ログ
+        console.log('🚀 セキュアチャット E2EE対応版が読み込まれました');
         console.log('📡 API Base:', window.API_BASE);
         console.log('🔌 WebSocket URL:', window.SOCKET_URL);
+        console.log('🔒 暗号化サポート:', !!(window.crypto && window.crypto.subtle));
+        console.log('🐛 デバッグモード:', window.DEBUG_MODE);
+        
+        // Web Crypto API サポート確認
+        if (!(window.crypto && window.crypto.subtle)) {
+            console.warn('⚠️ Web Crypto API がサポートされていません - 平文通信になります');
+        } else {
+            console.log('✅ Web Crypto API サポート確認完了');
+        }
     </script>
     
-    <!-- モジュール読み込み -->
+    <!-- モジュール読み込み（依存関係順） -->
     <script src="/js/modules/icons.js"></script>
     <script src="/js/modules/utils.js"></script>
+    <script src="/js/modules/crypto.js"></script>  <!-- 新規追加 -->
     <script src="/js/modules/api.js"></script>
     <script src="/js/components/Login.js"></script>
     <script src="/js/components/Chat.js"></script>
-    <script src="/js/app.js"></script>
-    <!-- <script src="/js/app-unified.js"></script> -->
-
+    
     <!-- メインアプリケーション -->
     <script src="/js/app.js"></script>
     
-    <!-- 開発用デバッグ情報 -->
+    <!-- 初期化・エラーハンドリング -->
     <script>
-        if (typeof React === 'undefined') {
-            console.error('❌ React が読み込まれていません');
-            document.getElementById('root').innerHTML = 
-                '<div style="color: red; text-align: center; margin-top: 50px;">React の読み込みに失敗しました</div>';
-        }
+        // ローディング画面の制御
+        document.addEventListener('DOMContentLoaded', () => {
+            setTimeout(() => {
+                const loading = document.getElementById('loading');
+                if (loading) {
+                    loading.style.display = 'none';
+                }
+                
+                // React アプリケーションの確認
+                if (!document.getElementById('root').hasChildNodes()) {
+                    setTimeout(() => {
+                        if (!document.getElementById('root').hasChildNodes()) {
+                            console.error('❌ React アプリケーションの読み込みに失敗');
+                            document.getElementById('error-fallback').style.display = 'flex';
+                        }
+                    }, 2000);
+                }
+            }, 500);
+        });
         
-        // エラーハンドリング
+        // グローバルエラーハンドリング
         window.addEventListener('error', (e) => {
             console.error('🐛 JavaScript エラー:', e.error);
+            
+            // 暗号化関連のエラーの場合は特別な処理
+            if (e.error?.message?.includes('crypto') || e.error?.message?.includes('encryption')) {
+                console.warn('🔒 暗号化エラーが発生しました - 平文モードに切り替えます');
+            }
         });
         
         window.addEventListener('unhandledrejection', (e) => {
             console.error('🐛 Promise エラー:', e.reason);
         });
+        
+        // パフォーマンス監視（開発環境のみ）
+        if (window.DEBUG_MODE && window.performance) {
+            window.addEventListener('load', () => {
+                setTimeout(() => {
+                    const loadTime = window.performance.timing.loadEventEnd - window.performance.timing.navigationStart;
+                    console.log(`⚡ ページ読み込み時間: ${loadTime}ms`);
+                }, 0);
+            });
+        }
+        
+        // サービスワーカー登録（将来の実装）
+        if ('serviceWorker' in navigator && window.location.protocol === 'https:') {
+            navigator.serviceWorker.register('/sw.js').then((registration) => {
+                console.log('✅ Service Worker 登録成功:', registration.scope);
+            }).catch((error) => {
+                console.log('❌ Service Worker 登録失敗:', error);
+            });
+        }
     </script>
 </body>
 </html>

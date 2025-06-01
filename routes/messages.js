@@ -49,10 +49,10 @@ module.exports = (db) => {
     }
   });
 
-  // メッセージ送信
+// メッセージ送信（暗号化対応）
   router.post('/create', (req, res) => {
     try {
-      const { spaceId, message } = req.body;
+      const { spaceId, message, encrypted, encryptedPayload } = req.body;
       
       if (!spaceId || !message?.trim()) {
         return res.status(400).json({ 
@@ -82,17 +82,33 @@ module.exports = (db) => {
       const now = new Date();
       const expiresAt = new Date(now.getTime() + parseInt(process.env.MESSAGE_EXPIRY_HOURS || '48') * 60 * 60 * 1000);
 
-      // メッセージ保存
+      // 🔒 暗号化データの処理
+      let storedContent = message.trim();
+      let storedEncryptedPayload = null;
+
+      if (encrypted && encryptedPayload) {
+        // 暗号化メッセージの場合
+        storedContent = '[ENCRYPTED]'; // データベースには暗号化済みマーカーを保存
+        storedEncryptedPayload = JSON.stringify(encryptedPayload); // 暗号化ペイロードをJSON文字列として保存
+        
+        console.log(`🔒 暗号化メッセージ受信: 空間 ${spaceId} - アルゴリズム: ${encryptedPayload.algorithm || 'Unknown'}`);
+      } else {
+        console.log(`📝 平文メッセージ受信: 空間 ${spaceId} - "${message.trim().substring(0, 30)}${message.trim().length > 30 ? '...' : ''}"`);
+      }
+
+      // メッセージ保存（暗号化ペイロード対応）
       const insertResult = db.prepare(`
-        INSERT INTO messages (id, space_id, encrypted_content, timestamp, expires_at, is_deleted)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO messages (id, space_id, encrypted_content, timestamp, expires_at, is_deleted, encrypted, encrypted_payload)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         messageId, 
         spaceId, 
-        message.trim(), 
+        storedContent, 
         now.toISOString(), 
         expiresAt.toISOString(), 
-        0
+        0,
+        encrypted ? 1 : 0,
+        storedEncryptedPayload
       );
 
       if (insertResult.changes === 0) {
@@ -102,15 +118,17 @@ module.exports = (db) => {
       // 空間の最終アクティビティ更新
       db.prepare('UPDATE spaces SET last_activity_at = datetime(\'now\') WHERE id = ?').run(spaceId);
 
+      // レスポンス用メッセージオブジェクト
       const newMessage = {
         id: messageId,
-        text: message.trim(),
+        text: message.trim(), // フロントエンドには元のメッセージを返す
         timestamp: now,
-        encrypted: true,
-        isDeleted: false
+        encrypted: Boolean(encrypted),
+        isDeleted: false,
+        encryptedPayload: encryptedPayload || null
       };
 
-      console.log(`📨 メッセージ送信: 空間 ${spaceId} に "${message.trim().substring(0, 30)}${message.trim().length > 30 ? '...' : ''}"`);
+      console.log(`📨 メッセージ送信完了: 空間 ${spaceId} - ID: ${messageId} - 暗号化: ${encrypted ? 'Yes' : 'No'}`);
 
       res.json({
         success: true,
