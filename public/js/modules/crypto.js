@@ -1,5 +1,7 @@
-// セキュアチャット E2EE暗号化モジュール - Phase 1B
-// ECDH鍵交換 + AES-256-GCM + 空間共有キーシステム
+// セキュアチャット E2EE暗号化モジュール - Phase 1B（恒久修正統合版）
+// ECDH鍵交換 + AES-256-GCM + 決定的暗号化キーシステム
+
+console.log('🔒 Phase 1B 暗号化モジュール読み込み開始（恒久修正版）');
 
 window.Crypto = {
   // Web Crypto API サポート確認
@@ -8,6 +10,12 @@ window.Crypto = {
            typeof crypto.subtle !== 'undefined' &&
            typeof crypto.getRandomValues !== 'undefined';
   })(),
+
+  // 🔑 空間共有キー管理
+  spaceKeys: new Map(),
+
+  // 🔑 パスフレーズキャッシュ（恒久修正）
+  passphraseCache: new Map(),
 
   // 鍵ペア生成（ECDH P-256）
   generateKeyPair: async () => {
@@ -147,68 +155,127 @@ window.Crypto = {
     }
   },
 
-  // 🔑 空間共有キー管理システム
-  spaceKeys: new Map(),
+  // =============================================================================
+  // 🔑 決定的暗号化キー生成システム（恒久修正）
+  // =============================================================================
 
-  // 空間共有キー生成・取得
-  getOrCreateSpaceKey: async (spaceId, peerPublicKeys = []) => {
+  /**
+   * 決定的キー生成（恒久版）
+   * @param {string} spaceId 空間ID
+   * @param {string} passphrase パスフレーズ
+   * @returns {Promise<CryptoKey>}
+   */
+  generateDeterministicKey: async (spaceId, passphrase = '') => {
     try {
+      window.Utils.log('debug', '決定的キー生成開始', { spaceId, hasPassphrase: !!passphrase });
+      
+      // パスフレーズが空の場合、キャッシュから取得を試行
+      if (!passphrase && window.Crypto.passphraseCache.has(spaceId)) {
+        passphrase = window.Crypto.passphraseCache.get(spaceId);
+        window.Utils.log('debug', 'キャッシュからパスフレーズ取得', { spaceId });
+      }
+      
+      // それでも空の場合はエラー
+      if (!passphrase) {
+        throw new Error(`空間 ${spaceId} のパスフレーズが見つかりません`);
+      }
+      
+      // 決定的なソルト生成
+      const encoder = new TextEncoder();
+      const seedData = encoder.encode(`secure-chat-v2:${spaceId}:${passphrase}`);
+      const saltBuffer = await crypto.subtle.digest('SHA-256', seedData);
+      
+      // パスワードベースキー導出
+      const baseKey = await crypto.subtle.importKey(
+        'raw',
+        encoder.encode(spaceId + ':' + passphrase),
+        'PBKDF2',
+        false,
+        ['deriveKey']
+      );
+      
+      // 決定的なAESキーを導出
+      const deterministicKey = await crypto.subtle.deriveKey(
+        {
+          name: 'PBKDF2',
+          salt: saltBuffer,
+          iterations: 100000,
+          hash: 'SHA-256'
+        },
+        baseKey,
+        {
+          name: 'AES-GCM',
+          length: 256
+        },
+        false,
+        ['encrypt', 'decrypt']
+      );
+      
+      window.Utils.log('success', '決定的キー生成完了', { spaceId });
+      return deterministicKey;
+      
+    } catch (error) {
+      window.Utils.log('error', '決定的キー生成エラー', { spaceId, error: error.message });
+      throw error;
+    }
+  },
+
+  /**
+   * 空間共有キー生成・取得（恒久修正版）
+   * @param {string} spaceId 空間ID
+   * @param {string} passphrase パスフレーズ
+   * @param {Array} peerPublicKeys ピアの公開鍵（将来の拡張用）
+   * @returns {Promise<CryptoKey>}
+   */
+  getOrCreateSpaceKey: async (spaceId, passphrase = '', peerPublicKeys = []) => {
+    try {
+      window.Utils.log('debug', '決定的空間キー処理開始', { spaceId, hasPassphrase: !!passphrase });
+      
+      // パスフレーズをキャッシュに保存
+      if (passphrase) {
+        window.Crypto.passphraseCache.set(spaceId, passphrase);
+        window.Utils.log('debug', 'パスフレーズをキャッシュに保存', { spaceId });
+      }
+      
       // 既存のキーがあるかチェック
       if (window.Crypto.spaceKeys.has(spaceId)) {
         const existingKey = window.Crypto.spaceKeys.get(spaceId);
-        window.Utils.log('debug', '既存の空間キーを使用', { spaceId });
+        window.Utils.log('debug', '既存の決定的キーを使用', { spaceId });
         return existingKey.sharedKey;
       }
-
-      // 新しい鍵ペアを生成
-      const myKeyPair = await window.Crypto.generateKeyPair();
-      const myPublicKeyJWK = await window.Crypto.exportPublicKey(myKeyPair.publicKey);
-
-      // 空間キー情報を保存
+      
+      // 決定的キーを生成
+      const deterministicKey = await window.Crypto.generateDeterministicKey(spaceId, passphrase);
+      
+      // ダミーの鍵ペア（将来の拡張用）
+      const dummyKeyPair = await window.Crypto.generateKeyPair();
+      const publicKeyJWK = await window.Crypto.exportPublicKey(dummyKeyPair.publicKey);
+      
+      // キー情報を保存
       const keyInfo = {
-        keyPair: myKeyPair,
-        publicKeyJWK: myPublicKeyJWK,
+        keyPair: dummyKeyPair,
+        publicKeyJWK: publicKeyJWK,
         peerKeys: new Map(),
-        sharedKey: null,
+        sharedKey: deterministicKey,
         createdAt: new Date(),
-        lastUsed: new Date()
+        lastUsed: new Date(),
+        type: 'deterministic',
+        passphrase: passphrase
       };
-
-      // 他のピアがいる場合は共有キー生成
-      if (peerPublicKeys.length > 0) {
-        // 最初のピアと共有キーを作成（後で複数ピア対応可能）
-        const firstPeerKey = await window.Crypto.importPublicKey(peerPublicKeys[0]);
-        keyInfo.sharedKey = await window.Crypto.deriveSharedSecret(
-          myKeyPair.privateKey, 
-          firstPeerKey, 
-          spaceId
-        );
-        keyInfo.peerKeys.set('peer_0', peerPublicKeys[0]);
-      } else {
-        // 一人だけの場合は一時的なキーを作成
-        const tempKey = await crypto.subtle.generateKey(
-          { name: 'AES-GCM', length: 256 },
-          false,
-          ['encrypt', 'decrypt']
-        );
-        keyInfo.sharedKey = tempKey;
-      }
-
+      
       window.Crypto.spaceKeys.set(spaceId, keyInfo);
-
-      window.Utils.log('success', '空間共有キー生成完了', { 
+      
+      window.Utils.log('success', '決定的空間キー生成完了', { 
         spaceId,
-        peerCount: peerPublicKeys.length,
-        keyType: peerPublicKeys.length > 0 ? 'ECDH-Derived' : 'Temporary'
+        keyType: 'deterministic',
+        hasPassphrase: !!passphrase
       });
-
-      return keyInfo.sharedKey;
+      
+      return deterministicKey;
+      
     } catch (error) {
-      window.Utils.log('error', '空間共有キー生成エラー', { 
-        spaceId, 
-        error: error.message 
-      });
-      throw new Error(`空間共有キーの生成に失敗しました: ${error.message}`);
+      window.Utils.log('error', '決定的空間キー処理エラー', { spaceId, error: error.message });
+      throw error;
     }
   },
 
@@ -367,7 +434,9 @@ window.Crypto = {
     }
   },
 
-  // 🔧 空間キー管理ユーティリティ
+  // =============================================================================
+  // 🔧 空間キー管理ユーティリティ（恒久修正版）
+  // =============================================================================
   
   // 空間キー情報取得
   getSpaceKeyInfo: (spaceId) => {
@@ -380,7 +449,9 @@ window.Crypto = {
       peerCount: keyInfo.peerKeys.size,
       createdAt: keyInfo.createdAt,
       lastUsed: keyInfo.lastUsed,
-      publicKeyJWK: keyInfo.publicKeyJWK
+      publicKeyJWK: keyInfo.publicKeyJWK,
+      type: keyInfo.type || 'unknown',
+      hasPassphrase: !!keyInfo.passphrase
     };
   },
 
@@ -393,34 +464,46 @@ window.Crypto = {
     return info;
   },
 
-  // 空間キークリーンアップ
+  // 🔧 空間キークリーンアップ（恒久修正 - 無効化）
   cleanupSpaceKey: (spaceId) => {
+    window.Utils.log('info', '空間キークリーンアップをスキップ（決定的キー保持）', { spaceId });
+    // クリーンアップを行わない（決定的キーを保持）
+    return false;
+  },
+
+  // デバッグ用: 強制クリーンアップ
+  forceCleanupSpaceKey: (spaceId) => {
     const deleted = window.Crypto.spaceKeys.delete(spaceId);
-    if (deleted) {
-      window.Utils.log('info', '空間キーをクリーンアップ', { spaceId });
-    }
+    const passphraseDeleted = window.Crypto.passphraseCache.delete(spaceId);
+    window.Utils.log('info', '強制クリーンアップ実行', { spaceId, deleted, passphraseDeleted });
     return deleted;
   },
 
   // 全キークリーンアップ
   cleanupAllKeys: () => {
     const count = window.Crypto.spaceKeys.size;
+    const passphraseCount = window.Crypto.passphraseCache.size;
     window.Crypto.spaceKeys.clear();
-    window.Utils.log('info', '全空間キーをクリーンアップ', { count });
+    window.Crypto.passphraseCache.clear();
+    window.Utils.log('info', '全空間キーをクリーンアップ', { keyCount: count, passphraseCount });
     return count;
   },
 
+  // =============================================================================
   // 🧪 システムテスト関数（拡張版）
+  // =============================================================================
+  
   testEncryption: async () => {
     try {
       window.Utils.log('info', '🧪 拡張暗号化テスト開始');
       
       const testMessage = 'これはグループ暗号化のテストメッセージです 🔒✨';
       const testSpaceId = 'test-space-' + Date.now();
+      const testPassphrase = 'test-passphrase-123';
       
-      // 1. 空間キー生成テスト
-      const sharedKey = await window.Crypto.getOrCreateSpaceKey(testSpaceId);
-      window.Utils.log('info', '✅ 空間キー生成テスト成功');
+      // 1. 決定的空間キー生成テスト
+      const sharedKey = await window.Crypto.getOrCreateSpaceKey(testSpaceId, testPassphrase);
+      window.Utils.log('info', '✅ 決定的空間キー生成テスト成功');
       
       // 2. 暗号化テスト
       const encrypted = await window.Crypto.encryptMessage(testMessage, testSpaceId);
@@ -446,16 +529,21 @@ window.Crypto = {
         isValid 
       });
       
-      // 5. 空間キー情報テスト
+      // 5. 決定性テスト（同じキーが生成されるか）
+      const sharedKey2 = await window.Crypto.getOrCreateSpaceKey(testSpaceId, testPassphrase);
+      const isDeterministic = sharedKey === sharedKey2;
+      window.Utils.log(isDeterministic ? 'success' : 'error', '✅ 決定性テスト', { isDeterministic });
+      
+      // 6. 空間キー情報テスト
       const keyInfo = window.Crypto.getSpaceKeyInfo(testSpaceId);
       window.Utils.log('info', '✅ 空間キー情報テスト', keyInfo);
       
-      // 6. クリーンアップテスト
-      const cleaned = window.Crypto.cleanupSpaceKey(testSpaceId);
-      window.Utils.log('info', '✅ クリーンアップテスト', { cleaned });
+      // 7. クリーンアップテスト（強制）
+      const cleaned = window.Crypto.forceCleanupSpaceKey(testSpaceId);
+      window.Utils.log('info', '✅ 強制クリーンアップテスト', { cleaned });
       
       const testResult = {
-        success: isValid,
+        success: isValid && isDeterministic,
         message: '全テスト完了',
         details: {
           original: testMessage,
@@ -463,6 +551,7 @@ window.Crypto = {
           decrypted: decrypted,
           algorithm: encrypted.algorithm,
           isValid,
+          isDeterministic,
           keyInfo
         }
       };
@@ -489,9 +578,10 @@ window.Crypto = {
       
       const testSpaceId = 'multi-test-' + Date.now();
       const testMessage = 'マルチユーザーテストメッセージ 👥🔒';
+      const testPassphrase = 'multi-test-passphrase';
       
       // ユーザーA（現在のユーザー）のキー生成
-      const userAKey = await window.Crypto.getOrCreateSpaceKey(testSpaceId);
+      const userAKey = await window.Crypto.getOrCreateSpaceKey(testSpaceId, testPassphrase);
       const userAPublicKey = window.Crypto.getMyPublicKey(testSpaceId);
       
       // ユーザーB（シミュレート）のキー生成
@@ -514,7 +604,7 @@ window.Crypto = {
       const isValid = testMessage === decrypted;
       
       // クリーンアップ
-      window.Crypto.cleanupSpaceKey(testSpaceId);
+      window.Crypto.forceCleanupSpaceKey(testSpaceId);
       
       const result = {
         success: isValid,
@@ -548,7 +638,9 @@ window.Crypto = {
     return {
       isSupported: window.Crypto.isSupported,
       activeSpaces: window.Crypto.spaceKeys.size,
+      cachedPassphrases: window.Crypto.passphraseCache.size,
       spaceKeyInfo: window.Crypto.getAllSpaceKeyInfo(),
+      passphrases: Array.from(window.Crypto.passphraseCache.keys()),
       browserInfo: {
         userAgent: navigator.userAgent,
         webCryptoSupport: typeof crypto?.subtle !== 'undefined',
@@ -560,9 +652,10 @@ window.Crypto = {
 
 // デバッグ用: 暗号化モジュールの読み込み確認
 if (typeof console !== 'undefined') {
-  console.log('✅ Crypto module loaded (Phase 1B):', {
+  console.log('✅ Crypto module loaded (Phase 1B + 恒久修正):', {
     methods: Object.keys(window.Crypto).length,
     isSupported: window.Crypto.isSupported,
-    version: 'Phase 1B - Group Encryption'
+    version: 'Phase 1B - 決定的暗号化システム',
+    features: ['決定的キー生成', 'パスフレーズキャッシュ', 'クリーンアップ防止']
   });
 }

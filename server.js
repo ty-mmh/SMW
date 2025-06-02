@@ -79,6 +79,29 @@ app.get('/health', (req, res) => {
   }
 });
 
+app.get('/api/health', (req, res) => {
+  try {
+    // データベース接続テスト
+    const result = db.prepare('SELECT 1 as test').get();
+    
+    res.json({ 
+      status: 'OK',
+      timestamp: new Date().toISOString(),
+      environment: process.env.NODE_ENV || 'development',
+      database: result ? 'Connected' : 'Disconnected',
+      version: process.env.npm_package_version || '1.0.0',
+      dbPath: dbPath.replace(process.cwd(), '.'),
+      endpoint: '/api/health' // デバッグ用
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'ERROR',
+      timestamp: new Date().toISOString(),
+      error: error.message
+    });
+  }
+});
+
 // API統計情報
 app.get('/api/stats', (req, res) => {
   try {

@@ -1,4 +1,4 @@
-// メインアプリケーション（暗号化統合・完全版）
+// メインアプリケーション（暗号化統合・恒久修正版）
 // E2EE暗号化機能を統合したセキュアチャットアプリ
 
 const { useState, useEffect } = React;
@@ -30,7 +30,7 @@ const SecureChatApp = () => {
   // =============================================================================
   useEffect(() => {
     const initializeApp = async () => {
-      window.Utils.log('info', 'アプリケーション初期化開始');
+      window.Utils.log('info', 'アプリケーション初期化開始（恒久修正版）');
       
       try {
         // 暗号化システムの可用性確認
@@ -38,10 +38,11 @@ const SecureChatApp = () => {
           setEncryptionStatus('enabled');
           setEncryptionInfo({
             supported: true,
-            algorithm: 'AES-256-GCM + ECDH',
-            status: '利用可能'
+            algorithm: 'AES-256-GCM + 決定的キー',
+            status: '利用可能',
+            keyType: 'deterministic'
           });
-          window.Utils.log('success', '暗号化システム確認完了');
+          window.Utils.log('success', '決定的暗号化システム確認完了');
         } else {
           setEncryptionStatus('disabled');
           setEncryptionInfo({
@@ -57,7 +58,7 @@ const SecureChatApp = () => {
         
         if (apiInitialized) {
           setConnectionStatus('connected');
-          window.Utils.log('success', 'アプリケーション初期化完了');
+          window.Utils.log('success', 'アプリケーション初期化完了（恒久修正版）');
         } else {
           setConnectionStatus('disconnected');
           window.Utils.log('warn', 'API接続に問題がありますが、アプリケーションを開始します');
@@ -187,11 +188,11 @@ const SecureChatApp = () => {
   }, [currentSpace]);
 
   // =============================================================================
-  // 空間入室処理（暗号化対応）
+  // 空間入室処理（恒久修正版）
   // =============================================================================
   const handleEnterSpace = async () => {
     window.Utils.performance.start('enter_space');
-    window.Utils.log('info', '空間入室処理開始', { passphraseLength: passphrase?.length });
+    window.Utils.log('info', '恒久版空間入室処理開始', { passphraseLength: passphrase?.length });
     
     const validation = window.Utils.validatePassphrase(passphrase);
     if (!validation.valid) {
@@ -203,12 +204,12 @@ const SecureChatApp = () => {
     setError('');
 
     try {
-      // 暗号化システムが利用可能な場合は初期化準備
+      // 暗号化システムが利用可能な場合は準備
       if (encryptionStatus === 'enabled') {
         setEncryptionStatus('initializing');
       }
 
-      // 空間入室API呼び出し（内部で暗号化システム初期化）
+      // 🔧 修正: 恒久版空間入室API呼び出し
       const space = await window.API.enterSpace(validation.passphrase);
       
       // 状態更新
@@ -216,38 +217,37 @@ const SecureChatApp = () => {
       setCurrentView('chat');
       setPassphrase('');
       
-      // 暗号化システム初期化完了確認
+      // 🔧 修正: 暗号化システム初期化確認（パスフレーズ付き）
       if (window.API.encryptionSystem) {
         setEncryptionStatus('enabled');
         setEncryptionInfo(prev => ({
           ...prev,
           spaceId: space.id,
-          publicKey: window.API.encryptionSystem.publicKey ? 
-            (typeof window.API.encryptionSystem.publicKey === 'string' ? 
-              window.API.encryptionSystem.publicKey.substring(0, 16) + '...' :
-              JSON.stringify(window.API.encryptionSystem.publicKey).substring(0, 16) + '...'
-            ) : 'なし',
-          initialized: true
+          publicKey: window.Utils.getSafePublicKey(window.API.encryptionSystem.publicKey),
+          initialized: true,
+          keyType: 'deterministic',
+          passphrase: space.passphrase
         }));
-        window.Utils.log('success', '空間暗号化システム初期化完了');
+        window.Utils.log('success', '恒久版空間暗号化システム確認完了');
       } else if (encryptionStatus === 'initializing') {
         setEncryptionStatus('disabled');
-        window.Utils.log('warn', '暗号化システム初期化失敗 - 平文通信に切り替え');
+        window.Utils.log('warn', '恒久版暗号化システム初期化失敗 - 平文通信に切り替え');
       }
       
       // メッセージ読み込み（復号化含む）
       const loadedMessages = await window.API.loadMessages(space.id);
       setMessages(loadedMessages);
       
-      window.Utils.log('success', '空間入室完了', { 
+      window.Utils.log('success', '恒久版空間入室完了', { 
         spaceId: space.id, 
         messageCount: loadedMessages.length,
         encryptedCount: loadedMessages.filter(m => m.encrypted).length,
+        decryptedCount: loadedMessages.filter(m => m.encrypted && !m.text.includes('[暗号化されたメッセージ')).length,
         encryptionEnabled: !!window.API.encryptionSystem
       });
       
     } catch (error) {
-      const errorMessage = window.Utils.handleError(error, '空間入室処理');
+      const errorMessage = window.Utils.handleError(error, '恒久版空間入室処理');
       setError(errorMessage);
       
       // 暗号化エラーの場合の状態更新
@@ -289,7 +289,7 @@ const SecureChatApp = () => {
       
       // 成功通知（暗号化情報を含む）
       const encryptionNote = encryptionStatus === 'enabled' ? 
-        '\n🔒 作成された空間ではE2EE暗号化が有効になります。' : 
+        '\n🔒 作成された空間では決定的E2EE暗号化が有効になります。' : 
         '\n⚠️ 暗号化機能が利用できないため、平文通信になります。';
         
       alert('✅ 新しい空間を作成しました！' + encryptionNote + '\n作成した合言葉で入室してください。');
@@ -358,10 +358,10 @@ const SecureChatApp = () => {
   };
 
   // =============================================================================
-  // 空間退室処理（暗号化対応）
+  // 空間退室処理（恒久修正版）
   // =============================================================================
   const handleLeaveSpace = () => {
-    window.Utils.log('info', '空間退室処理開始', { spaceId: currentSpace?.id });
+    window.Utils.log('info', '恒久版空間退室処理開始', { spaceId: currentSpace?.id });
     
     // WebSocket接続のクリーンアップ
     if (socket) {
@@ -372,28 +372,20 @@ const SecureChatApp = () => {
       setSocket(null);
     }
     
-    // 暗号化システムのクリーンアップ
-    window.API.leaveSpace();
+    // 🔧 修正: 暗号化システムは保持（決定的キーのため）
+    // window.API.leaveSpace(); // コメントアウト
     
-    // 状態リセット
+    // UIの状態リセット（暗号化情報は保持）
     setCurrentSpace(null);
     setCurrentView('login');
     setMessages([]);
     setError('');
     setConnectionStatus('disconnected');
     
-    // 暗号化状態リセット
-    if (encryptionStatus === 'enabled' && window.Crypto.isSupported) {
-      setEncryptionStatus('enabled');
-      setEncryptionInfo(prev => ({
-        ...prev,
-        spaceId: null,
-        publicKey: null,
-        initialized: false
-      }));
-    }
+    // 🔧 重要: 暗号化状態はリセットしない（決定的キー保持）
+    // 暗号化システムとキーは次回入室時に再利用される
     
-    window.Utils.log('success', '空間退室完了');
+    window.Utils.log('success', '恒久版空間退室完了 - 暗号化キー保持');
   };
 
   // =============================================================================
@@ -503,12 +495,95 @@ const SecureChatApp = () => {
           encryptionStatus,
           encryptionInfo,
           connectionStatus,
-          cryptoSupported: window.Crypto?.isSupported
+          cryptoSupported: window.Crypto?.isSupported,
+          encryptionDebug: window.API?.getEncryptionDebugInfo?.()
         }, null, 2))
       )
     )
   );
 };
+
+// =============================================================================
+// デバッグ関数（恒久修正版）
+// =============================================================================
+if (window.DEBUG_MODE) {
+  // グローバルデバッグ関数を追加
+  window.debugEncryptionState = () => {
+    console.log('🔍 恒久版暗号化状態デバッグ:');
+    console.log('API暗号化情報:', window.API.getEncryptionDebugInfo?.());
+    console.log('Crypto状態:', {
+      spaceKeys: window.Crypto?.spaceKeys?.size || 0,
+      passphraseCache: window.Crypto?.passphraseCache?.size || 0,
+      allSpaceInfo: window.Crypto?.getAllSpaceKeyInfo?.()
+    });
+  };
+  
+  window.testEncryptionPersistence = async () => {
+    console.log('🧪 暗号化永続性テスト開始...');
+    
+    if (!window.API?.currentSpace?.id) {
+      console.log('❌ 空間に入室してください');
+      return;
+    }
+    
+    const spaceId = window.API.currentSpace.id;
+    
+    // 1. 新しいメッセージを送信
+    const testMessage = 'テスト永続性 ' + new Date().toLocaleTimeString();
+    console.log('📤 テストメッセージ送信:', testMessage);
+    
+    try {
+      await window.API.sendMessage(spaceId, testMessage);
+      console.log('✅ 送信成功');
+      
+      // 2. 現在のメッセージ読み込み
+      console.log('📄 現在のメッセージ確認...');
+      const messages1 = await window.API.loadMessages(spaceId);
+      const testMsg1 = messages1.find(m => m.text.includes('テスト永続性'));
+      
+      if (testMsg1 && !testMsg1.text.includes('[暗号化されたメッセージ')) {
+        console.log('✅ 送信後復号化成功:', testMsg1.text);
+      } else {
+        console.log('❌ 送信後復号化失敗');
+        return false;
+      }
+      
+      // 3. 暗号化システムクリーンアップ（退室シミュレート）
+      console.log('🔄 暗号化システムクリーンアップ...');
+      window.API.encryptionSystem = null;
+      window.API.currentSpaceId = null;
+      
+      // 4. 再初期化（再入室シミュレート）
+      console.log('🔄 暗号化システム再初期化...');
+      const passphrase = window.API.currentSpace.passphrase;
+      await window.API.initializeEncryption(spaceId, passphrase);
+      
+      // 5. メッセージ再読み込み
+      console.log('📄 メッセージ再読み込み...');
+      const messages2 = await window.API.loadMessages(spaceId);
+      const testMsg2 = messages2.find(m => m.text.includes('テスト永続性'));
+      
+      if (testMsg2 && !testMsg2.text.includes('[暗号化されたメッセージ')) {
+        console.log('🎉 永続性テスト成功！再入室後も復号化されました:', testMsg2.text);
+        return true;
+      } else {
+        console.log('❌ 永続性テスト失敗：再入室後復号化できませんでした');
+        return false;
+      }
+      
+    } catch (error) {
+      console.error('❌ テスト失敗:', error);
+      return false;
+    }
+  };
+  
+  window.forceEncryptionReset = () => {
+    console.log('🔄 暗号化システム強制リセット...');
+    window.API.forceReset?.();
+    window.Crypto.cleanupAllKeys?.();
+    console.log('✅ 強制リセット完了');
+  };
+}
 
 // =============================================================================
 // アプリケーションマウント
@@ -523,13 +598,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const root = ReactDOM.createRoot(rootElement);
     root.render(React.createElement(SecureChatApp));
     
-    window.Utils.log('success', 'アプリケーションマウント完了');
+    window.Utils.log('success', 'アプリケーションマウント完了（恒久修正版）');
     
     // 暗号化機能のテスト（開発環境のみ）
     if (window.DEBUG_MODE && window.Crypto && window.Crypto.isSupported) {
       setTimeout(() => {
         window.Crypto.testEncryption().then(result => {
-          console.log(`🧪 暗号化システム統合テスト: ${result ? '✅ 成功' : '❌ 失敗'}`);
+          console.log(`🧪 決定的暗号化システム統合テスト: ${result.success ? '✅ 成功' : '❌ 失敗'}`);
+          if (result.success) {
+            console.log('🎊 恒久修正版が正常に動作しています！');
+          }
         });
       }, 1000);
     }
@@ -550,4 +628,10 @@ document.addEventListener('DOMContentLoaded', () => {
       </div>
     `;
   }
+});
+
+console.log('✅ app.js loaded (恒久修正版):', {
+  version: '決定的暗号化システム',
+  features: ['暗号化キー永続化', 'パスフレーズキャッシュ', 'クリーンアップ防止'],
+  debugMode: window.DEBUG_MODE
 });

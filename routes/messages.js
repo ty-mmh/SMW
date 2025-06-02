@@ -1,10 +1,12 @@
+// routes/messages.js - 暗号化対応完全修正版
+
 const express = require('express');
 const { nanoid } = require('../utils/id-generator');
 
 module.exports = (db) => {
   const router = express.Router();
 
-  // 空間のメッセージ一覧取得
+  // 空間のメッセージ一覧取得（暗号化対応修正版）
   router.get('/:spaceId', (req, res) => {
     try {
       const { spaceId } = req.params;
@@ -16,58 +18,113 @@ module.exports = (db) => {
         });
       }
 
-      // 削除されていないメッセージのみ取得
+      console.log(`📄 メッセージ取得要求: 空間 ${spaceId}`);
+
+      // 削除されていないメッセージのみ取得（暗号化フィールド含む）
       const messages = db.prepare(`
-        SELECT id, encrypted_content as text, timestamp, expires_at, is_deleted, encrypted, encrypted_payload
+        SELECT 
+          id, 
+          encrypted_content as text, 
+          timestamp, 
+          expires_at, 
+          is_deleted, 
+          encrypted, 
+          encrypted_payload
         FROM messages 
         WHERE space_id = ? AND is_deleted = 0 
         ORDER BY timestamp ASC
       `).all(spaceId);
 
-      // フロントエンド形式に変換
-      const formattedMessages = messages.map(msg => {
+      console.log(`📦 生データ取得: ${messages.length}件のメッセージ`);
+
+      // フロントエンド形式に変換（デバッグ強化）
+      const formattedMessages = messages.map((msg, index) => {
         let messageData = {
           id: msg.id,
           text: msg.text,
-          timestamp: new Date(msg.timestamp),
+          timestamp: msg.timestamp,
           encrypted: Boolean(msg.encrypted),
           isDeleted: Boolean(msg.is_deleted)
         };
 
-        // 暗号化データがある場合は解析
+        console.log(`メッセージ ${index + 1} 処理中:`, {
+          id: msg.id,
+          encrypted: msg.encrypted,
+          hasPayload: !!msg.encrypted_payload,
+          payloadLength: msg.encrypted_payload?.length || 0
+        });
+
+        // 🔧 修正: 暗号化データの処理を強化
         if (msg.encrypted && msg.encrypted_payload) {
           try {
+            console.log(`🔓 暗号化ペイロード解析中: ${msg.id}`);
             const payloadData = JSON.parse(msg.encrypted_payload);
-            messageData.encryptedData = payloadData.encryptedData;
-            messageData.iv = payloadData.iv;
-          } catch (error) {
-            console.error('暗号化ペイロード解析エラー:', error);
+            
+            // 必要なフィールドの確認
+            if (payloadData.encryptedData && payloadData.iv) {
+              messageData.encryptedData = payloadData.encryptedData;
+              messageData.iv = payloadData.iv;
+              messageData.algorithm = payloadData.algorithm || 'AES-GCM-256';
+              
+              console.log(`✅ 暗号化データ設定完了: ${msg.id}`, {
+                encryptedDataLength: payloadData.encryptedData.length,
+                ivLength: payloadData.iv.length,
+                algorithm: payloadData.algorithm
+              });
+            } else {
+              console.warn(`⚠️ 暗号化ペイロード不完全: ${msg.id}`, payloadData);
+              messageData.encryptedData = null;
+              messageData.iv = null;
+            }
+          } catch (parseError) {
+            console.error(`❌ 暗号化ペイロード解析エラー: ${msg.id}`, parseError);
+            messageData.encryptedData = null;
+            messageData.iv = null;
           }
+        } else if (msg.encrypted) {
+          // 暗号化フラグが立っているがペイロードがない場合
+          console.warn(`⚠️ 暗号化フラグがあるがペイロードなし: ${msg.id}`);
+          messageData.encryptedData = null;
+          messageData.iv = null;
         }
 
         return messageData;
       });
 
-      console.log(`📄 メッセージ取得: 空間 ${spaceId} から ${formattedMessages.length}件`);
+      console.log(`📨 レスポンス送信: ${formattedMessages.length}件のメッセージ`);
+      console.log('暗号化メッセージ数:', formattedMessages.filter(m => m.encrypted).length);
 
       res.json({
         success: true,
-        messages: formattedMessages
+        messages: formattedMessages,
+        debug: {
+          totalMessages: formattedMessages.length,
+          encryptedMessages: formattedMessages.filter(m => m.encrypted).length,
+          messagesWithData: formattedMessages.filter(m => m.encryptedData && m.iv).length
+        }
       });
 
     } catch (error) {
-      console.error('メッセージ取得エラー:', error);
+      console.error('❌ メッセージ取得エラー:', error);
       res.status(500).json({ 
         success: false,
-        error: 'サーバーエラーが発生しました' 
+        error: 'サーバーエラーが発生しました',
+        details: process.env.NODE_ENV === 'development' ? error.message : undefined
       });
     }
   });
 
-// メッセージ送信（暗号化対応）
+  // メッセージ送信（暗号化対応修正版）
   router.post('/create', (req, res) => {
     try {
       const { spaceId, message, encrypted, encryptedPayload } = req.body;
+      
+      console.log('📤 メッセージ送信要求:', {
+        spaceId,
+        messageLength: message?.length || 0,
+        encrypted: Boolean(encrypted),
+        hasEncryptedPayload: !!encryptedPayload
+      });
       
       if (!spaceId || !message?.trim()) {
         return res.status(400).json({ 
@@ -97,23 +154,57 @@ module.exports = (db) => {
       const now = new Date();
       const expiresAt = new Date(now.getTime() + parseInt(process.env.MESSAGE_EXPIRY_HOURS || '48') * 60 * 60 * 1000);
 
-      // 🔒 暗号化データの処理
+      // 🔧 修正: 暗号化データの処理を強化
       let storedContent = message.trim();
       let storedEncryptedPayload = null;
+      let isEncrypted = false;
 
       if (encrypted && encryptedPayload) {
         // 暗号化メッセージの場合
-        storedContent = '[ENCRYPTED]'; // データベースには暗号化済みマーカーを保存
-        storedEncryptedPayload = JSON.stringify(encryptedPayload); // 暗号化ペイロードをJSON文字列として保存
-        
-        console.log(`🔒 暗号化メッセージ受信: 空間 ${spaceId} - アルゴリズム: ${encryptedPayload.algorithm || 'Unknown'}`);
+        console.log('🔒 暗号化メッセージ処理中:', {
+          encryptedDataLength: encryptedPayload.encryptedData?.length || 0,
+          ivLength: encryptedPayload.iv?.length || 0,
+          algorithm: encryptedPayload.algorithm
+        });
+
+        // 暗号化ペイロードの検証
+        if (encryptedPayload.encryptedData && encryptedPayload.iv) {
+          storedContent = '[ENCRYPTED]'; // データベース識別用
+          storedEncryptedPayload = JSON.stringify({
+            encryptedData: encryptedPayload.encryptedData,
+            iv: encryptedPayload.iv,
+            algorithm: encryptedPayload.algorithm || 'AES-GCM-256',
+            timestamp: now.toISOString()
+          });
+          isEncrypted = true;
+          
+          console.log('✅ 暗号化ペイロード作成完了');
+        } else {
+          console.warn('⚠️ 暗号化ペイロード不完全 - 平文として保存');
+        }
       } else {
-        console.log(`📝 平文メッセージ受信: 空間 ${spaceId} - "${message.trim().substring(0, 30)}${message.trim().length > 30 ? '...' : ''}"`);
+        console.log('📝 平文メッセージとして処理');
       }
+
+      console.log('💾 データベース保存中:', {
+        messageId,
+        encrypted: isEncrypted,
+        contentLength: storedContent.length,
+        hasPayload: !!storedEncryptedPayload
+      });
 
       // メッセージ保存（暗号化ペイロード対応）
       const insertResult = db.prepare(`
-        INSERT INTO messages (id, space_id, encrypted_content, timestamp, expires_at, is_deleted, encrypted, encrypted_payload)
+        INSERT INTO messages (
+          id, 
+          space_id, 
+          encrypted_content, 
+          timestamp, 
+          expires_at, 
+          is_deleted, 
+          encrypted, 
+          encrypted_payload
+        )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         messageId, 
@@ -122,7 +213,7 @@ module.exports = (db) => {
         now.toISOString(), 
         expiresAt.toISOString(), 
         0,
-        encrypted ? 1 : 0,
+        isEncrypted ? 1 : 0,
         storedEncryptedPayload
       );
 
@@ -137,21 +228,85 @@ module.exports = (db) => {
       const newMessage = {
         id: messageId,
         text: message.trim(), // フロントエンドには元のメッセージを返す
-        timestamp: now,
-        encrypted: Boolean(encrypted),
-        isDeleted: false,
-        encryptedPayload: encryptedPayload || null
+        timestamp: now.toISOString(),
+        encrypted: isEncrypted,
+        isDeleted: false
       };
 
-      console.log(`📨 メッセージ送信完了: 空間 ${spaceId} - ID: ${messageId} - 暗号化: ${encrypted ? 'Yes' : 'No'}`);
+      // 暗号化データがある場合は追加
+      if (isEncrypted && encryptedPayload) {
+        newMessage.encryptedData = encryptedPayload.encryptedData;
+        newMessage.iv = encryptedPayload.iv;
+        newMessage.algorithm = encryptedPayload.algorithm;
+      }
+
+      console.log('✅ メッセージ送信完了:', {
+        messageId,
+        encrypted: isEncrypted,
+        responseSize: JSON.stringify(newMessage).length
+      });
 
       res.json({
         success: true,
-        message: newMessage
+        message: newMessage,
+        debug: {
+          messageId,
+          encrypted: isEncrypted,
+          hasEncryptedData: !!newMessage.encryptedData,
+          hasIv: !!newMessage.iv
+        }
       });
 
     } catch (error) {
-      console.error('メッセージ送信エラー:', error);
+      console.error('❌ メッセージ送信エラー:', error);
+      res.status(500).json({ 
+        success: false,
+        error: 'サーバーエラーが発生しました',
+        details: process.env.NODE_ENV === 'development' ? error.message : undefined
+      });
+    }
+  });
+
+  // 🔧 新規追加: メッセージデバッグエンドポイント（開発環境のみ）
+  router.get('/debug/:spaceId', (req, res) => {
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(403).json({ 
+        success: false,
+        error: 'この機能は本番環境では利用できません' 
+      });
+    }
+
+    try {
+      const { spaceId } = req.params;
+      
+      console.log(`🔍 デバッグ情報取得: 空間 ${spaceId}`);
+
+      // 全メッセージ取得（削除済み含む）
+      const allMessages = db.prepare(`
+        SELECT * FROM messages WHERE space_id = ? ORDER BY timestamp ASC
+      `).all(spaceId);
+
+      const debugInfo = allMessages.map(msg => ({
+        id: msg.id,
+        encrypted_content_preview: msg.encrypted_content?.substring(0, 50) + '...',
+        encrypted: Boolean(msg.encrypted),
+        has_encrypted_payload: !!msg.encrypted_payload,
+        encrypted_payload_preview: msg.encrypted_payload?.substring(0, 100) + '...',
+        is_deleted: Boolean(msg.is_deleted),
+        timestamp: msg.timestamp,
+        expires_at: msg.expires_at
+      }));
+
+      res.json({
+        success: true,
+        spaceId,
+        messageCount: allMessages.length,
+        encryptedCount: allMessages.filter(m => m.encrypted).length,
+        messages: debugInfo
+      });
+
+    } catch (error) {
+      console.error('❌ デバッグ情報取得エラー:', error);
       res.status(500).json({ 
         success: false,
         error: 'サーバーエラーが発生しました' 
@@ -179,106 +334,7 @@ module.exports = (db) => {
       });
 
     } catch (error) {
-      console.error('メッセージクリーンアップエラー:', error);
-      res.status(500).json({ 
-        success: false,
-        error: 'サーバーエラーが発生しました' 
-      });
-    }
-  });
-
-  // メッセージ統計情報取得（開発環境のみ）
-  router.get('/stats/:spaceId', (req, res) => {
-    if (process.env.NODE_ENV === 'production') {
-      return res.status(403).json({ 
-        success: false,
-        error: 'この機能は本番環境では利用できません' 
-      });
-    }
-
-    try {
-      const { spaceId } = req.params;
-      
-      if (!spaceId) {
-        return res.status(400).json({ 
-          success: false,
-          error: '空間IDが必要です' 
-        });
-      }
-
-      const stats = db.prepare(`
-        SELECT 
-          COUNT(*) as total_messages,
-          COUNT(CASE WHEN is_deleted = 0 THEN 1 END) as active_messages,
-          COUNT(CASE WHEN is_deleted = 1 THEN 1 END) as deleted_messages,
-          MIN(timestamp) as first_message,
-          MAX(timestamp) as last_message,
-          COUNT(CASE WHEN expires_at <= datetime('now') AND is_deleted = 0 THEN 1 END) as expired_messages
-        FROM messages 
-        WHERE space_id = ?
-      `).get(spaceId);
-
-      res.json({
-        success: true,
-        spaceId,
-        stats
-      });
-
-    } catch (error) {
-      console.error('メッセージ統計取得エラー:', error);
-      res.status(500).json({ 
-        success: false,
-        error: 'サーバーエラーが発生しました' 
-      });
-    }
-  });
-
-  // メッセージ削除（管理用・開発環境のみ）
-  router.delete('/:messageId', (req, res) => {
-    if (process.env.NODE_ENV === 'production') {
-      return res.status(403).json({ 
-        success: false,
-        error: 'この機能は本番環境では利用できません' 
-      });
-    }
-
-    try {
-      const { messageId } = req.params;
-      
-      if (!messageId) {
-        return res.status(400).json({ 
-          success: false,
-          error: 'メッセージIDが必要です' 
-        });
-      }
-
-      // メッセージ存在確認
-      const message = db.prepare('SELECT id, space_id FROM messages WHERE id = ?').get(messageId);
-      
-      if (!message) {
-        return res.status(404).json({ 
-          success: false,
-          error: 'メッセージが見つかりません' 
-        });
-      }
-
-      // 論理削除
-      const result = db.prepare('UPDATE messages SET is_deleted = 1 WHERE id = ?').run(messageId);
-
-      if (result.changes === 0) {
-        throw new Error('メッセージの削除に失敗しました');
-      }
-
-      console.log(`🗑️ メッセージ削除: ID ${messageId} (空間: ${message.space_id})`);
-
-      res.json({
-        success: true,
-        message: 'メッセージを削除しました',
-        messageId
-      });
-
-    } catch (error) {
-      console.error('メッセージ削除エラー:', error);
+      console.error('❌ メッセージクリーンアップエラー:', error);
       res.status(500).json({ 
         success: false,
         error: 'サーバーエラーが発生しました' 
