@@ -18,20 +18,35 @@ module.exports = (db) => {
 
       // 削除されていないメッセージのみ取得
       const messages = db.prepare(`
-        SELECT id, encrypted_content as text, timestamp, expires_at, is_deleted 
+        SELECT id, encrypted_content as text, timestamp, expires_at, is_deleted, encrypted, encrypted_payload
         FROM messages 
         WHERE space_id = ? AND is_deleted = 0 
         ORDER BY timestamp ASC
       `).all(spaceId);
 
       // フロントエンド形式に変換
-      const formattedMessages = messages.map(msg => ({
-        id: msg.id,
-        text: msg.text,
-        timestamp: new Date(msg.timestamp),
-        encrypted: true,
-        isDeleted: Boolean(msg.is_deleted)
-      }));
+      const formattedMessages = messages.map(msg => {
+        let messageData = {
+          id: msg.id,
+          text: msg.text,
+          timestamp: new Date(msg.timestamp),
+          encrypted: Boolean(msg.encrypted),
+          isDeleted: Boolean(msg.is_deleted)
+        };
+
+        // 暗号化データがある場合は解析
+        if (msg.encrypted && msg.encrypted_payload) {
+          try {
+            const payloadData = JSON.parse(msg.encrypted_payload);
+            messageData.encryptedData = payloadData.encryptedData;
+            messageData.iv = payloadData.iv;
+          } catch (error) {
+            console.error('暗号化ペイロード解析エラー:', error);
+          }
+        }
+
+        return messageData;
+      });
 
       console.log(`📄 メッセージ取得: 空間 ${spaceId} から ${formattedMessages.length}件`);
 

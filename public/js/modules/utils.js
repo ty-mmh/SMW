@@ -118,6 +118,17 @@ window.Utils = {
     };
   },
 
+  // 公開キーの安全な表示用関数
+  getSafePublicKey: (publicKey) => {
+    if (!publicKey) return 'なし';
+    if (typeof publicKey === 'string') return publicKey.substring(0, 16) + '...';
+    if (typeof publicKey === 'object') {
+      if (publicKey.x) return publicKey.x.substring(0, 16) + '...';
+      return JSON.stringify(publicKey).substring(0, 16) + '...';
+    }
+    return '不明';
+  },
+
   // 合言葉バリデーション
   validatePassphrase: (passphrase) => {
     if (!passphrase) {

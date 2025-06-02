@@ -222,7 +222,11 @@ const SecureChatApp = () => {
         setEncryptionInfo(prev => ({
           ...prev,
           spaceId: space.id,
-          publicKey: window.API.encryptionSystem.publicKey.substring(0, 16) + '...',
+          publicKey: window.API.encryptionSystem.publicKey ? 
+            (typeof window.API.encryptionSystem.publicKey === 'string' ? 
+              window.API.encryptionSystem.publicKey.substring(0, 16) + '...' :
+              JSON.stringify(window.API.encryptionSystem.publicKey).substring(0, 16) + '...'
+            ) : 'なし',
           initialized: true
         }));
         window.Utils.log('success', '空間暗号化システム初期化完了');

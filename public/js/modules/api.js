@@ -1,4 +1,4 @@
-// API通信モジュール（暗号化統合版）
+// API通信モジュール（暗号化統合版・修正版）
 // サーバーとの通信、暗号化処理、エラーハンドリング
 
 window.API = {
@@ -100,33 +100,66 @@ window.API = {
   /**
    * 空間の暗号化システムを初期化
    * @param {string} spaceId 
-   * @returns {Promise<void>}
+   * @returns {Promise<boolean>}
    */
   initializeEncryption: async (spaceId) => {
     try {
-      if (!window.Crypto.isSupported) {
+      if (!window.Crypto || !window.Crypto.isSupported) {
         window.Utils.log('warn', 'Web Crypto API未サポート - 暗号化を無効化');
-        return;
+        return false;
       }
 
       window.Utils.log('info', '暗号化システム初期化開始', { spaceId });
       
-      // 暗号化システム初期化
-      window.API.encryptionSystem = await window.Crypto.initializeSpaceEncryption(spaceId);
+      // 🔧 修正: 正しい関数名を使用
+      const spaceKey = await window.Crypto.getOrCreateSpaceKey(spaceId);
+      
+      // 暗号化システムオブジェクト作成
+      window.API.encryptionSystem = {
+        spaceId: spaceId,
+        spaceKey: spaceKey,
+        publicKey: null,
+        
+        // メッセージ暗号化関数
+        encryptMessage: async (message) => {
+          return await window.Crypto.encryptMessage(message, spaceId);
+        },
+        
+        // メッセージ復号化関数
+        decryptMessage: async (encData, iv) => {
+          return await window.Crypto.decryptMessage(encData, iv, spaceId);
+        }
+      };
+      
       window.API.currentSpaceId = spaceId;
       
+      // 公開鍵設定の試行
+      try {
+        if (window.Crypto.getMyPublicKey) {
+          window.API.encryptionSystem.publicKey = window.Crypto.getMyPublicKey(spaceId);
+        }
+      } catch (keyError) {
+        window.Utils.log('warn', '公開鍵取得をスキップ', keyError.message);
+      }
+      
       // 公開鍵をサーバーに送信（将来の実装）
-      await window.API.announcePublicKey(spaceId, window.API.encryptionSystem.publicKey);
+      if (window.API.encryptionSystem.publicKey) {
+        await window.API.announcePublicKey(spaceId, window.API.encryptionSystem.publicKey);
+      }
       
       window.Utils.log('success', '暗号化システム初期化完了', { 
         spaceId,
-        publicKeyLength: window.API.encryptionSystem.publicKey.length 
+        hasSpaceKey: !!spaceKey,
+        hasPublicKey: !!window.API.encryptionSystem.publicKey
       });
+      
+      return true;
       
     } catch (error) {
       window.Utils.log('error', '暗号化システム初期化エラー', error.message);
       // 暗号化エラーでもアプリケーションは継続
       window.API.encryptionSystem = null;
+      return false;
     }
   },
 
@@ -157,6 +190,9 @@ window.API = {
    * 暗号化システムをクリーンアップ
    */
   cleanupEncryption: () => {
+    if (window.API.currentSpaceId && window.Crypto && window.Crypto.cleanupSpaceKey) {
+      window.Crypto.cleanupSpaceKey(window.API.currentSpaceId);
+    }
     window.API.encryptionSystem = null;
     window.API.currentSpaceId = null;
     window.API.otherUsers.clear();
@@ -213,7 +249,7 @@ window.API = {
       } else {
         window.Utils.log('warn', '🔒 暗号化システム初期化をスキップ', { 
           spaceId: safeSpace.id,
-          reason: '既に初期化済み' 
+          reason: '初期化失敗またはサポート外' 
         });
       }
     } catch (encryptionError) {
@@ -420,10 +456,7 @@ window.API = {
       throw new Error('暗号化システムが初期化されていません');
     }
 
-    // 現在は自分の鍵で暗号化（将来は受信者の公開鍵を使用）
-    // 暫定的に自分の公開鍵を使用
-    const dummyPublicKey = window.API.encryptionSystem.publicKey;
-    return await window.API.encryptionSystem.encryptForUser(message, dummyPublicKey);
+    return await window.API.encryptionSystem.encryptMessage(message);
   },
 
   /**
@@ -440,12 +473,9 @@ window.API = {
       throw new Error('暗号化データが不完全です');
     }
 
-    // 現在は自分の鍵で復号化（将来は送信者の公開鍵を使用）
-    const dummyPublicKey = window.API.encryptionSystem.publicKey;
-    return await window.API.encryptionSystem.decryptFromUser(
+    return await window.API.encryptionSystem.decryptMessage(
       encryptedMessage.encryptedData,
-      encryptedMessage.iv,
-      dummyPublicKey
+      encryptedMessage.iv
     );
   },
 
