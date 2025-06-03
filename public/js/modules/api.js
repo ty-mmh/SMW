@@ -927,3 +927,257 @@ if (typeof console !== 'undefined') {
     features: ['決定的暗号化', 'パスフレーズ永続化', 'クリーンアップ防止']
   });
 }
+
+console.log('🔄 FRIENDLYモード API機能追加中...');
+
+Object.assign(window.API, {
+  /**
+   * FRIENDLYモード対応メッセージ送信
+   * @param {string} spaceId 空間ID
+   * @param {string} message メッセージ本文
+   * @returns {Promise<Object>} 送信結果
+   */
+  sendMessageFriendly: async (spaceId, message) => {
+    if (!spaceId || !message.trim()) {
+      throw new Error('空間IDとメッセージが必要です');
+    }
+    
+    window.Utils.performance.start('send_message_friendly');
+    window.Utils.log('info', 'FRIENDLYモードメッセージ送信開始', { 
+      spaceId, 
+      messageLength: message.length 
+    });
+    
+    try {
+      // セッション活性度更新
+      window.SessionManager.updateActivity();
+      
+      // ハイブリッド暗号化実行
+      const encryptedResult = await window.Crypto.encryptMessageHybrid(message, spaceId);
+      
+      // サーバー送信用ペイロード作成
+      const payload = {
+        spaceId,
+        message: message.trim(),
+        encrypted: true,
+        encryptedPayload: {
+          type: encryptedResult.type,
+          encryptedData: encryptedResult.encryptedData,
+          iv: encryptedResult.iv,
+          algorithm: encryptedResult.algorithm,
+          timestamp: encryptedResult.timestamp || new Date().toISOString()
+        }
+      };
+      
+      // ハイブリッドの場合はフォールバック情報も追加
+      if (encryptedResult.type === 'hybrid') {
+        payload.encryptedPayload.sessionParticipants = encryptedResult.sessionParticipants;
+        payload.encryptedPayload.fallbackData = encryptedResult.fallbackData;
+      }
+      
+      window.Utils.log('debug', 'サーバーに送信するペイロード', {
+        spaceId,
+        encryptedType: encryptedResult.type,
+        hasSessionData: !!encryptedResult.sessionParticipants,
+        hasFallback: !!encryptedResult.fallbackData,
+        payloadSize: JSON.stringify(payload.encryptedPayload).length
+      });
+      
+      // API呼び出し
+      const result = await window.API.call('/messages/create', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+      
+      if (!result.success || !result.message) {
+        throw new Error(result.error || 'メッセージ送信に失敗しました');
+      }
+      
+      // ローカル表示用メッセージ作成
+      const newMessage = {
+        id: result.message.id,
+        text: message.trim(),
+        timestamp: new Date(result.message.timestamp),
+        encrypted: true,
+        encryptionType: encryptedResult.type,
+        sessionParticipants: encryptedResult.sessionParticipants || null,
+        hasFallback: !!encryptedResult.fallbackData,
+        isDeleted: false
+      };
+      
+      window.Utils.log('success', 'FRIENDLYモードメッセージ送信完了', {
+        messageId: newMessage.id,
+        encryptionType: newMessage.encryptionType,
+        textLength: newMessage.text.length,
+        hasFallback: newMessage.hasFallback
+      });
+      
+      window.Utils.performance.end('send_message_friendly');
+      return newMessage;
+      
+    } catch (error) {
+      window.Utils.performance.end('send_message_friendly');
+      const errorMessage = window.Utils.handleError(error, 'FRIENDLYモードメッセージ送信');
+      throw new Error(errorMessage);
+    }
+  },
+  
+  /**
+   * FRIENDLYモード対応メッセージ読み込み
+   * @param {string} spaceId 空間ID
+   * @returns {Promise<Array>} メッセージ配列
+   */
+  loadMessagesFriendly: async (spaceId) => {
+    if (!spaceId) {
+      throw new Error('空間IDが必要です');
+    }
+    
+    window.Utils.performance.start('load_messages_friendly');
+    window.Utils.log('info', 'FRIENDLYモードメッセージ読み込み開始', { spaceId });
+    
+    try {
+      const result = await window.API.call(`/messages/${spaceId}`);
+      
+      if (!result.success) {
+        throw new Error('メッセージ取得に失敗しました');
+      }
+      
+      const messages = Array.isArray(result.messages) ? result.messages : [];
+      window.Utils.log('debug', '取得したメッセージ', { 
+        messageCount: messages.length,
+        encryptedCount: messages.filter(m => m.encrypted).length
+      });
+      
+      const processedMessages = await Promise.all(messages.map(async (msg, index) => {
+        try {
+          let decryptedText = msg.text || '';
+          let encryptionInfo = {
+            encrypted: false,
+            encryptionType: 'plaintext',
+            sessionParticipants: null,
+            hasFallback: false
+          };
+          
+          window.Utils.log('debug', `メッセージ ${index + 1}/${messages.length} 処理開始`, {
+            id: msg.id,
+            encrypted: msg.encrypted,
+            hasEncryptedData: !!msg.encryptedData,
+            hasPayload: !!msg.encrypted_payload
+          });
+          
+          if (msg.encrypted && (msg.encryptedData || msg.encrypted_payload)) {
+            // 暗号化メッセージの復号化
+            try {
+              // 暗号化データの構築
+              let encryptedMessage = {
+                type: 'deterministic',
+                encryptedData: msg.encryptedData,
+                iv: msg.iv,
+                algorithm: msg.algorithm || 'AES-GCM-256'
+              };
+              
+              // サーバーからのencrypted_payloadを解析
+              if (msg.encrypted_payload) {
+                try {
+                  const payloadData = typeof msg.encrypted_payload === 'string' ? 
+                    JSON.parse(msg.encrypted_payload) : msg.encrypted_payload;
+                  
+                  encryptedMessage = {
+                    type: payloadData.type || 'deterministic',
+                    encryptedData: payloadData.encryptedData || msg.encryptedData,
+                    iv: payloadData.iv || msg.iv,
+                    algorithm: payloadData.algorithm || 'AES-GCM-256',
+                    sessionParticipants: payloadData.sessionParticipants,
+                    fallbackData: payloadData.fallbackData,
+                    timestamp: payloadData.timestamp
+                  };
+                  
+                  window.Utils.log('debug', `メッセージ ${msg.id} ペイロード解析成功`, {
+                    type: encryptedMessage.type,
+                    hasSessionData: !!encryptedMessage.sessionParticipants,
+                    hasFallback: !!encryptedMessage.fallbackData
+                  });
+                } catch (parseError) {
+                  window.Utils.log('warn', `メッセージ ${msg.id} ペイロード解析失敗`, parseError.message);
+                }
+              }
+              
+              // フォールバック付き復号化実行
+              decryptedText = await window.Crypto.decryptMessageWithFallback(encryptedMessage, spaceId);
+              
+              encryptionInfo = {
+                encrypted: true,
+                encryptionType: encryptedMessage.type,
+                sessionParticipants: encryptedMessage.sessionParticipants,
+                hasFallback: !!encryptedMessage.fallbackData
+              };
+              
+              window.Utils.log('success', `メッセージ ${msg.id} 復号化成功`, {
+                type: encryptionInfo.encryptionType,
+                textLength: decryptedText.length,
+                method: encryptedMessage.type === 'hybrid' ? 'ハイブリッド' : '決定的'
+              });
+              
+            } catch (decryptError) {
+              window.Utils.log('error', `メッセージ ${msg.id} 復号化失敗`, {
+                error: decryptError.message,
+                hasEncryptedData: !!msg.encryptedData,
+                hasPayload: !!msg.encrypted_payload
+              });
+              
+              decryptedText = '[復号化できませんでした]';
+              encryptionInfo.encrypted = true;
+              encryptionInfo.encryptionType = 'error';
+            }
+          }
+          
+          return {
+            id: msg.id || `temp_${Date.now()}_${index}`,
+            text: decryptedText,
+            timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(),
+            isDeleted: Boolean(msg.is_deleted),
+            ...encryptionInfo
+          };
+          
+        } catch (error) {
+          window.Utils.log('error', `メッセージ ${index + 1} 処理エラー`, {
+            error: error.message,
+            msgData: {
+              id: msg?.id,
+              encrypted: msg?.encrypted,
+              hasEncryptedData: !!msg?.encryptedData
+            }
+          });
+          
+          return {
+            id: `error_${Date.now()}_${index}`,
+            text: `[メッセージ処理エラー: ${error.message}]`,
+            timestamp: new Date(),
+            encrypted: false,
+            encryptionType: 'error',
+            isDeleted: false
+          };
+        }
+      }));
+      
+      window.Utils.log('success', 'FRIENDLYモードメッセージ読み込み完了', {
+        spaceId,
+        messageCount: processedMessages.length,
+        encryptedCount: processedMessages.filter(m => m.encrypted).length,
+        hybridCount: processedMessages.filter(m => m.encryptionType === 'hybrid').length,
+        deterministicCount: processedMessages.filter(m => m.encryptionType === 'deterministic').length,
+        errorCount: processedMessages.filter(m => m.encryptionType === 'error').length
+      });
+      
+      window.Utils.performance.end('load_messages_friendly');
+      return processedMessages;
+      
+    } catch (error) {
+      window.Utils.performance.end('load_messages_friendly');
+      const errorMessage = window.Utils.handleError(error, 'FRIENDLYモードメッセージ読み込み');
+      throw new Error(errorMessage);
+    }
+  }
+});
+
+console.log('✅ FRIENDLYモード API機能追加完了');
