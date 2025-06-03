@@ -659,3 +659,371 @@ if (typeof console !== 'undefined') {
     features: ['決定的キー生成', 'パスフレーズキャッシュ', 'クリーンアップ防止']
   });
 }
+
+console.log('🔄 FRIENDLYモード暗号化機能追加中...');
+
+Object.assign(window.Crypto, {
+  /**
+   * セッション暗号化キー生成
+   * @param {Array<string>} sessionIds セッションIDの配列
+   * @param {string} spaceId 空間ID
+   * @returns {Promise<CryptoKey>} セッションキー
+   */
+  deriveSessionKey: async (sessionIds, spaceId) => {
+    try {
+      // セッションIDをソートして決定的にする
+      const sortedSessions = [...sessionIds].sort();
+      
+      window.Utils.log('debug', 'セッションキー生成開始', { 
+        spaceId, 
+        sessionCount: sortedSessions.length,
+        sessionPreviews: sortedSessions.map(s => s.substring(0, 12) + '...')
+      });
+      
+      // 決定的な材料を作成
+      const encoder = new TextEncoder();
+      const keyMaterial = encoder.encode(
+        `friendly-session-key:${spaceId}:${sortedSessions.join(':')}`
+      );
+      
+      // ハッシュ化
+      const hashBuffer = await crypto.subtle.digest('SHA-256', keyMaterial);
+      
+      // AESキーとしてインポート
+      const sessionKey = await crypto.subtle.importKey(
+        'raw',
+        hashBuffer,
+        { name: 'AES-GCM', length: 256 },
+        false,
+        ['encrypt', 'decrypt']
+      );
+      
+      window.Utils.log('success', 'セッションキー生成完了', { 
+        spaceId, 
+        sessionCount: sortedSessions.length 
+      });
+      
+      return sessionKey;
+    } catch (error) {
+      window.Utils.log('error', 'セッションキー生成エラー', { 
+        spaceId, 
+        error: error.message 
+      });
+      throw error;
+    }
+  },
+  
+  /**
+   * ハイブリッド暗号化（FRIENDLYモード）
+   * @param {string} message 平文メッセージ
+   * @param {string} spaceId 空間ID
+   * @returns {Promise<Object>} 暗号化結果
+   */
+  encryptMessageHybrid: async (message, spaceId) => {
+    try {
+      window.Utils.performance.start('hybrid_encrypt');
+      window.Utils.log('info', 'ハイブリッド暗号化開始', { 
+        spaceId,
+        messageLength: message.length 
+      });
+      
+      // Step 1: 決定的暗号化（フォールバック保証）
+      const deterministicResult = await window.Crypto.encryptMessage(message, spaceId);
+      
+      // 現在のアクティブセッション取得
+      const activeSessions = window.SessionManager.getActiveSessionsForSpace(spaceId);
+      const currentSession = window.SessionManager.getCurrentSession();
+      
+      // 現在のセッションも含める（まだ追加されていない場合）
+      if (currentSession && currentSession.spaceId === spaceId) {
+        if (!activeSessions.includes(currentSession.sessionId)) {
+          activeSessions.push(currentSession.sessionId);
+        }
+      }
+      
+      window.Utils.log('debug', 'セッション情報確認', { 
+        activeSessionCount: activeSessions.length,
+        currentSessionId: currentSession ? currentSession.sessionId.substring(0, 12) + '...' : 'none'
+      });
+      
+      if (activeSessions.length <= 1) {
+        // 単独セッション: 決定的暗号化のみ
+        window.Utils.log('info', '単独セッション: 決定的暗号化のみ使用');
+        
+        const result = {
+          type: 'deterministic',
+          encryptedData: deterministicResult.encryptedData,
+          iv: deterministicResult.iv,
+          algorithm: deterministicResult.algorithm || 'AES-GCM-256',
+          spaceId
+        };
+        
+        window.Utils.performance.end('hybrid_encrypt');
+        return result;
+        
+      } else {
+        // 複数セッション: ハイブリッド暗号化
+        window.Utils.log('info', 'マルチセッション: ハイブリッド暗号化実行', { 
+          sessionCount: activeSessions.length 
+        });
+        
+        // Step 2: セッション暗号化
+        const sessionKey = await window.Crypto.deriveSessionKey(activeSessions, spaceId);
+        const sessionIv = crypto.getRandomValues(new Uint8Array(12));
+        
+        const sessionEncrypted = await crypto.subtle.encrypt(
+          {
+            name: 'AES-GCM',
+            iv: sessionIv,
+            tagLength: 128
+          },
+          sessionKey,
+          new TextEncoder().encode(deterministicResult.encryptedData)
+        );
+        
+        const sessionData = btoa(String.fromCharCode(...new Uint8Array(sessionEncrypted)));
+        const sessionIvBase64 = btoa(String.fromCharCode(...sessionIv));
+        
+        const result = {
+          type: 'hybrid',
+          // メインデータ（セッション暗号化）
+          encryptedData: sessionData,
+          iv: sessionIvBase64,
+          algorithm: 'AES-GCM-256',
+          sessionParticipants: activeSessions,
+          // フォールバックデータ（決定的暗号化）
+          fallbackData: {
+            encryptedData: deterministicResult.encryptedData,
+            iv: deterministicResult.iv,
+            algorithm: deterministicResult.algorithm || 'AES-GCM-256'
+          },
+          spaceId,
+          timestamp: new Date().toISOString()
+        };
+        
+        window.Utils.log('success', 'ハイブリッド暗号化完了', { 
+          type: result.type,
+          sessionCount: activeSessions.length,
+          hasFallback: !!result.fallbackData
+        });
+        
+        window.Utils.performance.end('hybrid_encrypt');
+        return result;
+      }
+    } catch (error) {
+      window.Utils.performance.end('hybrid_encrypt');
+      window.Utils.log('error', 'ハイブリッド暗号化エラー', { 
+        spaceId, 
+        error: error.message,
+        stack: error.stack
+      });
+      throw error;
+    }
+  },
+  
+  /**
+   * フォールバック付き復号化
+   * @param {Object} encryptedMessage 暗号化されたメッセージ
+   * @param {string} spaceId 空間ID
+   * @returns {Promise<string>} 復号化されたメッセージ
+   */
+  decryptMessageWithFallback: async (encryptedMessage, spaceId) => {
+    try {
+      window.Utils.performance.start('hybrid_decrypt');
+      window.Utils.log('debug', 'フォールバック復号化開始', { 
+        type: encryptedMessage.type,
+        spaceId,
+        hasEncryptedData: !!encryptedMessage.encryptedData,
+        hasFallback: !!encryptedMessage.fallbackData
+      });
+      
+      if (encryptedMessage.type === 'deterministic') {
+        // 決定的暗号化のみ
+        window.Utils.log('debug', '決定的復号化実行');
+        const result = await window.Crypto.decryptMessage(
+          encryptedMessage.encryptedData,
+          encryptedMessage.iv,
+          spaceId
+        );
+        window.Utils.performance.end('hybrid_decrypt');
+        return result;
+      }
+      
+      if (encryptedMessage.type === 'hybrid') {
+        // ハイブリッド暗号化: セッション復号化を試行
+        try {
+          window.Utils.log('debug', 'セッション復号化を試行', {
+            sessionParticipants: encryptedMessage.sessionParticipants?.length || 0
+          });
+          
+          // 現在のアクティブセッションでセッションキー生成
+          let sessionIds = window.SessionManager.getActiveSessionsForSpace(spaceId);
+          
+          // 現在のセッションも追加
+          const currentSession = window.SessionManager.getCurrentSession();
+          if (currentSession && currentSession.spaceId === spaceId) {
+            if (!sessionIds.includes(currentSession.sessionId)) {
+              sessionIds.push(currentSession.sessionId);
+            }
+          }
+          
+          // 保存されたセッション参加者も試行
+          if (encryptedMessage.sessionParticipants && encryptedMessage.sessionParticipants.length > 0) {
+            sessionIds = encryptedMessage.sessionParticipants;
+          }
+          
+          window.Utils.log('debug', 'セッションキー生成用ID', { 
+            sessionCount: sessionIds.length,
+            previews: sessionIds.map(s => s.substring(0, 12) + '...')
+          });
+          
+          const sessionKey = await window.Crypto.deriveSessionKey(sessionIds, spaceId);
+          
+          // セッション復号化
+          const sessionEncrypted = new Uint8Array(
+            atob(encryptedMessage.encryptedData).split('').map(char => char.charCodeAt(0))
+          );
+          const sessionIv = new Uint8Array(
+            atob(encryptedMessage.iv).split('').map(char => char.charCodeAt(0))
+          );
+          
+          const sessionDecrypted = await crypto.subtle.decrypt(
+            {
+              name: 'AES-GCM',
+              iv: sessionIv,
+              tagLength: 128
+            },
+            sessionKey,
+            sessionEncrypted
+          );
+          
+          const deterministicData = new TextDecoder().decode(sessionDecrypted);
+          
+          // 決定的復号化を実行
+          const finalMessage = await window.Crypto.decryptMessage(
+            deterministicData,
+            encryptedMessage.fallbackData.iv,
+            spaceId
+          );
+          
+          window.Utils.log('success', 'セッション復号化成功');
+          window.Utils.performance.end('hybrid_decrypt');
+          return finalMessage;
+          
+        } catch (sessionError) {
+          // セッション復号化失敗 → フォールバック
+          window.Utils.log('warn', 'セッション復号化失敗、フォールバック実行', { 
+            error: sessionError.message,
+            hasFallbackData: !!encryptedMessage.fallbackData
+          });
+          
+          if (!encryptedMessage.fallbackData) {
+            throw new Error('フォールバックデータが見つかりません');
+          }
+          
+          try {
+            const fallbackMessage = await window.Crypto.decryptMessage(
+              encryptedMessage.fallbackData.encryptedData,
+              encryptedMessage.fallbackData.iv,
+              spaceId
+            );
+            
+            window.Utils.log('success', 'フォールバック復号化成功');
+            window.Utils.performance.end('hybrid_decrypt');
+            return fallbackMessage;
+            
+          } catch (fallbackError) {
+            window.Utils.log('error', 'フォールバック復号化も失敗', { 
+              sessionError: sessionError.message,
+              fallbackError: fallbackError.message
+            });
+            throw new Error(`復号化完全失敗: セッション(${sessionError.message}) フォールバック(${fallbackError.message})`);
+          }
+        }
+      }
+      
+      throw new Error(`未知の暗号化タイプ: ${encryptedMessage.type}`);
+      
+    } catch (error) {
+      window.Utils.performance.end('hybrid_decrypt');
+      window.Utils.log('error', 'フォールバック復号化エラー', { 
+        spaceId, 
+        error: error.message,
+        encryptedType: encryptedMessage.type
+      });
+      throw error;
+    }
+  },
+  
+  /**
+   * FRIENDLYモード暗号化テスト
+   * @returns {Promise<Object>} テスト結果
+   */
+  testFriendlyEncryption: async () => {
+    try {
+      window.Utils.log('info', '🧪 FRIENDLYモード暗号化テスト開始');
+      
+      const testSpaceId = 'test-friendly-' + Date.now();
+      const testMessage = 'FRIENDLYモード暗号化テストメッセージ 🔒✨';
+      const results = [];
+      
+      // セッション初期化
+      const sessionId = window.SessionManager.initializeSession(testSpaceId);
+      results.push(`✅ セッション初期化: ${sessionId.substring(0, 12)}...`);
+      
+      // Test 1: 単独セッション暗号化
+      window.Utils.log('debug', 'Test 1: 単独セッション暗号化');
+      const singleEncrypted = await window.Crypto.encryptMessageHybrid(testMessage, testSpaceId);
+      const singleDecrypted = await window.Crypto.decryptMessageWithFallback(singleEncrypted, testSpaceId);
+      const singleSuccess = testMessage === singleDecrypted;
+      results.push(`${singleSuccess ? '✅' : '❌'} 単独セッション: ${singleEncrypted.type} (${singleSuccess})`);
+      
+      // Test 2: マルチセッション暗号化
+      window.Utils.log('debug', 'Test 2: マルチセッション暗号化');
+      window.SessionManager.activeSessions.set(testSpaceId, new Set([sessionId, 'session_test_2', 'session_test_3']));
+      const multiEncrypted = await window.Crypto.encryptMessageHybrid(testMessage, testSpaceId);
+      const multiDecrypted = await window.Crypto.decryptMessageWithFallback(multiEncrypted, testSpaceId);
+      const multiSuccess = testMessage === multiDecrypted;
+      results.push(`${multiSuccess ? '✅' : '❌'} マルチセッション: ${multiEncrypted.type} (${multiSuccess})`);
+      
+      // Test 3: フォールバックテスト
+      window.Utils.log('debug', 'Test 3: フォールバックテスト');
+      window.SessionManager.activeSessions.set(testSpaceId, new Set(['different_session_id'])); // 異なるセッション
+      const fallbackDecrypted = await window.Crypto.decryptMessageWithFallback(multiEncrypted, testSpaceId);
+      const fallbackSuccess = testMessage === fallbackDecrypted;
+      results.push(`${fallbackSuccess ? '✅' : '❌'} フォールバック: ${fallbackSuccess}`);
+      
+      // クリーンアップ
+      window.SessionManager.leaveSession(testSpaceId);
+      
+      const allSuccess = results.every(r => r.startsWith('✅'));
+      
+      const testResult = {
+        success: allSuccess,
+        message: allSuccess ? '🎉 全テスト成功！' : '⚠️ 一部テスト失敗',
+        details: results,
+        testData: {
+          singleEncrypted: singleEncrypted.type,
+          multiEncrypted: multiEncrypted.type,
+          hasFallback: !!multiEncrypted.fallbackData
+        }
+      };
+      
+      window.Utils.log(allSuccess ? 'success' : 'error', '🧪 FRIENDLYモードテスト結果', testResult);
+      return testResult;
+      
+    } catch (error) {
+      const errorResult = {
+        success: false,
+        message: '❌ テスト実行エラー',
+        error: error.message,
+        details: []
+      };
+      
+      window.Utils.log('error', '🧪 FRIENDLYモードテスト失敗', errorResult);
+      return errorResult;
+    }
+  }
+});
+
+console.log('✅ FRIENDLYモード暗号化機能追加完了');
