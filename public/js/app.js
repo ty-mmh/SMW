@@ -1,4 +1,4 @@
-// メインアプリケーション（FRIENDLYモード完成版統合）
+// メインアプリケーション（FRIENDLYモード完成版統合・Socket.IO強化）
 // E2EE暗号化機能を統合したセキュアチャットアプリ
 
 const { useState, useEffect } = React;
@@ -26,6 +26,11 @@ const SecureChatApp = () => {
   const [encryptionInfo, setEncryptionInfo] = useState(null);
   const [sessionCount, setSessionCount] = useState(1);
   const [sessionInfo, setSessionInfo] = useState(null);
+  
+  // 🆕 Socket.IO統合強化用状態
+  const [realtimeUsers, setRealtimeUsers] = useState([]);
+  const [typingUsers, setTypingUsers] = useState([]);
+  const [keyExchangeStatus, setKeyExchangeStatus] = useState({});
   
   // パフォーマンス関連の状態
   const [performanceData, setPerformanceData] = useState(null);
@@ -107,7 +112,7 @@ const SecureChatApp = () => {
   }, []);
 
   // =============================================================================
-  // セッション管理エフェクト
+  // セッション管理エフェクト（Socket.IO統合強化）
   // =============================================================================
   useEffect(() => {
     if (currentSpace && window.SessionManager) {
@@ -135,6 +140,16 @@ const SecureChatApp = () => {
                 to: newEncryptionLevel,
                 sessionCount: activeSessions.length
               });
+              
+              // 🆕 Socket.IOに暗号化レベル変更を通知
+              if (socket && socket.connected) {
+                socket.emit('encryption-level-changed', {
+                  spaceId: currentSpace.id,
+                  encryptionLevel: newEncryptionLevel,
+                  sessionCount: activeSessions.length,
+                  timestamp: new Date().toISOString()
+                });
+              }
             }
             
             return {
@@ -165,7 +180,7 @@ const SecureChatApp = () => {
 
       return () => clearInterval(sessionUpdateInterval);
     }
-  }, [currentSpace, encryptionStatus]);
+  }, [currentSpace, encryptionStatus, socket]);
 
   // 🆕 Action 1.2で追加: 暗号化状態変更専用エフェクト（簡略版）
   useEffect(() => {
@@ -207,11 +222,11 @@ const SecureChatApp = () => {
   }, []);
 
   // =============================================================================
-  // Socket.IO接続管理（FRIENDLYモード対応）
+  // Socket.IO接続管理（FRIENDLYモード統合強化版）
   // =============================================================================
   useEffect(() => {
     if (currentSpace && typeof io !== 'undefined') {
-      window.Utils.log('info', 'FRIENDLYモード WebSocket接続初期化', { spaceId: currentSpace.id });
+      window.Utils.log('info', 'FRIENDLYモード Socket.IO統合強化版接続初期化', { spaceId: currentSpace.id });
       setConnectionStatus('connecting');
       
       const newSocket = io(window.SOCKET_URL, {
@@ -222,33 +237,160 @@ const SecureChatApp = () => {
         reconnectionDelay: 1000
       });
       
-      // 接続イベント
+      // =============================================================================
+      // 基本接続イベント
+      // =============================================================================
+      
       newSocket.on('connect', () => {
-        window.Utils.log('success', 'WebSocket接続成功');
+        window.Utils.log('success', 'FRIENDLYモード Socket.IO統合強化版接続成功');
         setConnectionStatus('connected');
         newSocket.emit('join-space', currentSpace.id);
         
-        // セッション情報をサーバーに送信
+        // 🆕 セッション情報をサーバーに送信（強化版）
         if (window.SessionManager) {
           const currentSession = window.SessionManager.getCurrentSession();
           if (currentSession) {
             newSocket.emit('session-info', {
               sessionId: currentSession.sessionId,
-              spaceId: currentSpace.id
+              spaceId: currentSpace.id,
+              timestamp: new Date().toISOString()
             });
           }
         }
       });
 
-      // メッセージ受信（FRIENDLYモード対応）
+      // =============================================================================
+      // 🆕 FRIENDLYモード専用イベント処理
+      // =============================================================================
+      
+      // 空間参加完了
+      newSocket.on('space-joined', (data) => {
+        window.Utils.log('success', 'FRIENDLYモード 空間参加完了', data);
+        setConnectionStatus('connected');
+      });
+      
+      // セッション登録完了
+      newSocket.on('session-registered', (data) => {
+        window.Utils.log('success', 'セッション登録完了', data);
+        
+        // セッション数の更新
+        if (data.sessionCount) {
+          setSessionCount(data.sessionCount);
+          
+          // 暗号化レベルの更新
+          const newEncryptionLevel = data.sessionCount > 1 ? 'hybrid' : 'deterministic';
+          setEncryptionInfo(prev => ({
+            ...prev,
+            sessionCount: data.sessionCount,
+            encryptionLevel: newEncryptionLevel,
+            lastUpdate: new Date()
+          }));
+        }
+      });
+      
+      // セッション数更新（リアルタイム）
+      newSocket.on('session-count-updated', (data) => {
+        window.Utils.log('info', 'リアルタイム セッション数更新', data);
+        
+        if (data.spaceId === currentSpace.id) {
+          setSessionCount(data.sessionCount);
+          
+          // 暗号化レベルの自動更新
+          setEncryptionInfo(prev => ({
+            ...prev,
+            sessionCount: data.sessionCount,
+            encryptionLevel: data.encryptionLevel,
+            lastUpdate: new Date(),
+            autoUpdated: true,
+            updateReason: data.reason || 'session_change'
+          }));
+          
+          // SessionManagerにも反映
+          if (window.SessionManager && data.sessionCount > 1) {
+            // 他のセッションが参加した場合の処理
+            window.Utils.log('debug', 'SessionManager セッション数同期', {
+              currentCount: data.sessionCount,
+              encryptionLevel: data.encryptionLevel
+            });
+          }
+        }
+      });
+      
+      // 暗号化レベル更新（他のユーザーから）
+      newSocket.on('encryption-level-updated', (data) => {
+        window.Utils.log('info', '他ユーザーからの暗号化レベル更新', data);
+        
+        if (data.spaceId === currentSpace.id) {
+          setEncryptionInfo(prev => ({
+            ...prev,
+            encryptionLevel: data.encryptionLevel,
+            sessionCount: data.sessionCount || prev.sessionCount,
+            lastUpdate: new Date(),
+            updatedBy: 'other_user',
+            triggeredBy: data.triggeredBy
+          }));
+        }
+      });
+      
+      // =============================================================================
+      // セッション管理イベント（強化版）
+      // =============================================================================
+      
+      // セッション参加通知
+      newSocket.on('session-joined', (data) => {
+        window.Utils.log('info', 'セッション参加通知', data);
+        if (window.SessionManager && data.sessionId && data.spaceId === currentSpace.id) {
+          window.SessionManager.addSessionToSpace(data.spaceId, data.sessionId);
+          
+          // UIに通知
+          window.Utils.log('info', '🎉 新しいユーザーが参加しました', {
+            sessionId: data.sessionId.substring(0, 12) + '...'
+          });
+        }
+      });
+
+      // セッション退出通知
+      newSocket.on('session-left', (data) => {
+        window.Utils.log('info', 'セッション退出通知', data);
+        if (window.SessionManager && data.sessionId && data.spaceId === currentSpace.id) {
+          window.SessionManager.removeSessionFromSpace(data.spaceId, data.sessionId);
+          
+          // UIに通知
+          window.Utils.log('info', '👋 ユーザーが退出しました', {
+            sessionId: data.sessionId.substring(0, 12) + '...'
+          });
+        }
+      });
+      
+      // ユーザー参加・退出
+      newSocket.on('user-joined', (data) => {
+        window.Utils.log('info', 'ユーザー参加', data);
+        setRealtimeUsers(prev => [...prev.filter(u => u.userId !== data.userId), {
+          userId: data.userId,
+          joinedAt: data.timestamp,
+          status: 'joined'
+        }]);
+      });
+      
+      newSocket.on('user-left', (data) => {
+        window.Utils.log('info', 'ユーザー退出', data);
+        setRealtimeUsers(prev => prev.filter(u => u.userId !== data.userId));
+      });
+      
+      // =============================================================================
+      // メッセージ受信（FRIENDLYモード対応強化）
+      // =============================================================================
+      
       newSocket.on('message-received', async (data) => {
-        window.Utils.log('info', 'FRIENDLYモード メッセージ受信', { from: data.from });
+        window.Utils.log('info', 'FRIENDLYモード統合強化版 メッセージ受信', { from: data.from });
         
         if (data && data.message) {
           try {
             let receivedMessage = {
               ...data.message,
-              timestamp: new Date(data.message.timestamp)
+              timestamp: new Date(data.message.timestamp),
+              sessionCount: data.sessionCount || 1,
+              encryptionInfo: data.encryptionInfo || null
             };
 
             // FRIENDLYモード復号化処理
@@ -283,57 +425,145 @@ const SecureChatApp = () => {
           }
         }
       });
-
-      // セッション管理イベント
-      newSocket.on('session-joined', (data) => {
-        window.Utils.log('info', 'セッション参加通知', data);
-        if (window.SessionManager && data.sessionId && data.spaceId === currentSpace.id) {
-          window.SessionManager.addSessionToSpace(data.spaceId, data.sessionId);
-        }
+      
+      // メッセージ送信確認
+      newSocket.on('message-sent-confirmation', (data) => {
+        window.Utils.log('success', 'メッセージ送信確認', {
+          messageId: data.messageId,
+          deliveredTo: data.deliveredTo
+        });
       });
 
-      newSocket.on('session-left', (data) => {
-        window.Utils.log('info', 'セッション退出通知', data);
-        if (window.SessionManager && data.sessionId && data.spaceId === currentSpace.id) {
-          window.SessionManager.removeSessionFromSpace(data.spaceId, data.sessionId);
-        }
+      // =============================================================================
+      // 🆕 キー交換機能（基本実装）
+      // =============================================================================
+      
+      // キー交換要求受信
+      newSocket.on('key-exchange-request', (data) => {
+        window.Utils.log('info', 'キー交換要求受信', data);
+        
+        setKeyExchangeStatus(prev => ({
+          ...prev,
+          [data.exchangeId]: {
+            status: 'received',
+            fromUser: data.fromUser,
+            publicKey: data.publicKey,
+            timestamp: data.timestamp
+          }
+        }));
+        
+        // 将来: UIでユーザーに確認を求める
+        console.log('🔑 キー交換要求を受信しました:', data.exchangeId);
+      });
+      
+      // キー交換応答受信
+      newSocket.on('key-exchange-response', (data) => {
+        window.Utils.log('info', 'キー交換応答受信', data);
+        
+        setKeyExchangeStatus(prev => ({
+          ...prev,
+          [data.exchangeId]: {
+            ...prev[data.exchangeId],
+            status: 'responded',
+            responsePublicKey: data.publicKey,
+            responseFrom: data.fromUser
+          }
+        }));
+      });
+      
+      // キー交換完了
+      newSocket.on('key-exchange-completed', (data) => {
+        window.Utils.log('success', 'キー交換完了', data);
+        
+        setKeyExchangeStatus(prev => ({
+          ...prev,
+          [data.exchangeId]: {
+            ...prev[data.exchangeId],
+            status: 'completed',
+            completedAt: new Date().toISOString()
+          }
+        }));
       });
 
-      // その他のイベント
-      newSocket.on('encryption-key-exchange', (data) => {
-        window.Utils.log('debug', '暗号化キー交換', data);
-        // 将来: 公開キー交換処理
+      // =============================================================================
+      // その他の機能強化
+      // =============================================================================
+      
+      // タイピング状態
+      newSocket.on('user-typing', (data) => {
+        setTypingUsers(prev => {
+          if (data.isTyping) {
+            return [...prev.filter(u => u.userId !== data.userId), {
+              userId: data.userId,
+              timestamp: data.timestamp
+            }];
+          } else {
+            return prev.filter(u => u.userId !== data.userId);
+          }
+        });
+      });
+      
+      // 部屋情報更新
+      newSocket.on('room-info', (data) => {
+        window.Utils.log('debug', '部屋情報更新', data);
+        // 必要に応じて UI に反映
       });
 
-      newSocket.on('space-info-update', (data) => {
-        window.Utils.log('debug', '空間情報更新', data);
-      });
-
+      // =============================================================================
+      // エラーハンドリング
+      // =============================================================================
+      
       newSocket.on('disconnect', (reason) => {
-        window.Utils.log('warn', 'WebSocket接続切断', { reason });
+        window.Utils.log('warn', 'FRIENDLYモード Socket.IO接続切断', { reason });
         setConnectionStatus('disconnected');
+        setRealtimeUsers([]);
+        setTypingUsers([]);
       });
 
       newSocket.on('reconnect', (attemptNumber) => {
-        window.Utils.log('success', 'WebSocket再接続成功', { attemptNumber });
+        window.Utils.log('success', 'FRIENDLYモード Socket.IO再接続成功', { attemptNumber });
         setConnectionStatus('connected');
         newSocket.emit('join-space', currentSpace.id);
+        
+        // セッション情報を再送信
+        if (window.SessionManager) {
+          const currentSession = window.SessionManager.getCurrentSession();
+          if (currentSession) {
+            newSocket.emit('session-info', {
+              sessionId: currentSession.sessionId,
+              spaceId: currentSpace.id,
+              timestamp: new Date().toISOString()
+            });
+          }
+        }
       });
 
       newSocket.on('error', (error) => {
-        window.Utils.log('error', 'WebSocketエラー', error);
+        window.Utils.log('error', 'FRIENDLYモード Socket.IOエラー', error);
         setConnectionStatus('disconnected');
+      });
+      
+      newSocket.on('error-response', (data) => {
+        window.Utils.log('error', 'サーバーエラー応答', data);
+        setError(`サーバーエラー: ${data.error}`);
+        
+        setTimeout(() => {
+          setError(prev => prev.includes(data.error) ? '' : prev);
+        }, 5000);
       });
 
       setSocket(newSocket);
 
       return () => {
-        window.Utils.log('info', 'WebSocket接続クリーンアップ');
+        window.Utils.log('info', 'FRIENDLYモード Socket.IO接続クリーンアップ');
         if (newSocket.connected) {
           newSocket.emit('leave-space', currentSpace.id);
         }
         newSocket.disconnect();
         setConnectionStatus('disconnected');
+        setRealtimeUsers([]);
+        setTypingUsers([]);
+        setKeyExchangeStatus({});
       };
     }
   }, [currentSpace]);
@@ -474,7 +704,7 @@ const SecureChatApp = () => {
   };
 
   // =============================================================================
-  // メッセージ送信処理（FRIENDLYモード対応）
+  // メッセージ送信処理（FRIENDLYモード対応・Socket.IO強化）
   // =============================================================================
   const handleSendMessage = async () => {
     if (!message.trim() || !currentSpace) return;
@@ -508,11 +738,23 @@ const SecureChatApp = () => {
       setMessages(prev => [...prev, newMessage]);
       setMessage('');
       
-      // Socket.IOで他のユーザーに送信
+      // 🆕 Socket.IOで他のユーザーに送信（強化版）
       if (socket && socket.connected) {
         socket.emit('new-message', {
           spaceId: currentSpace.id,
-          message: newMessage
+          message: newMessage,
+          encryptionInfo: {
+            type: newMessage.encryptionType || 'deterministic',
+            sessionCount: sessionCount,
+            hasFallback: newMessage.hasFallback
+          }
+        });
+        
+        // セッション活性度更新をサーバーに通知
+        socket.emit('session-activity', {
+          spaceId: currentSpace.id,
+          activity: 'message_sent',
+          notifyOthers: false
         });
       } else {
         window.Utils.log('warn', 'WebSocket未接続のため、リアルタイム配信をスキップ');
@@ -560,6 +802,9 @@ const SecureChatApp = () => {
     setConnectionStatus('disconnected');
     setSessionCount(1);
     setSessionInfo(null);
+    setRealtimeUsers([]);
+    setTypingUsers([]);
+    setKeyExchangeStatus({});
     
     // 暗号化状態は保持（FRIENDLYモードの特徴）
     
@@ -613,7 +858,7 @@ const SecureChatApp = () => {
 
   // チャット画面（FRIENDLYモード完成版UI使用）
   if (currentView === 'chat' && currentSpace) {
-    // 統合チャットUIを使用
+    // 統合チャットUIを使用（Socket.IO統合強化版）
     if (window.IntegratedChatComponent) {
       return React.createElement(window.IntegratedChatComponent, {
         currentSpace,
@@ -630,9 +875,10 @@ const SecureChatApp = () => {
         sessionCount,
         sessionInfo,
         performanceData,
-        sessionCount,
-        sessionInfo,
-        performanceData,
+        // 🆕 Socket.IO統合強化版用の props
+        realtimeUsers,
+        typingUsers,
+        keyExchangeStatus,
         onSendMessage: handleSendMessage,
         onLeaveSpace: handleLeaveSpace
       });
@@ -681,6 +927,9 @@ const SecureChatApp = () => {
             setError('');
             setMessages([]);
             setEncryptionStatus(window.Crypto?.isSupported ? 'enabled' : 'disabled');
+            setRealtimeUsers([]);
+            setTypingUsers([]);
+            setKeyExchangeStatus({});
             window.Utils.log('info', 'FRIENDLYモード手動リセット実行');
           },
           className: 'bg-blue-600 hover:bg-blue-700 px-6 py-3 rounded-lg font-medium transition duration-200'
@@ -698,7 +947,9 @@ const SecureChatApp = () => {
           React.createElement('li', null, '• ハイブリッド暗号化（複数セッション）'),
           React.createElement('li', null, '• フォールバック復号化'),
           React.createElement('li', null, '• セッション自動検出'),
-          React.createElement('li', null, '• 過去メッセージ読み込み保証')
+          React.createElement('li', null, '• 過去メッセージ読み込み保証'),
+          React.createElement('li', null, '• リアルタイムセッション同期'),
+          React.createElement('li', null, '• 暗号化レベル自動切り替え')
         )
       ),
       
@@ -706,13 +957,16 @@ const SecureChatApp = () => {
       window.DEBUG_MODE && React.createElement(
         'div',
         { className: 'mt-6 p-3 bg-gray-800 border border-gray-700 rounded-lg text-xs text-left' },
-        React.createElement('h3', { className: 'font-bold mb-2' }, 'FRIENDLYモード デバッグ情報:'),
+        React.createElement('h3', { className: 'font-bold mb-2' }, 'FRIENDLYモード Socket.IO統合強化版 デバッグ情報:'),
         React.createElement('pre', { className: 'text-gray-400 text-xs overflow-x-auto' }, JSON.stringify({
           encryptionStatus,
           encryptionInfo,
           connectionStatus,
           sessionCount,
           sessionInfo,
+          realtimeUsers,
+          typingUsers,
+          keyExchangeStatus,
           cryptoSupported: window.Crypto?.isSupported,
           friendlyModeFeatures: window.API?.getEncryptionDebugInfo?.(),
           performanceData
@@ -723,11 +977,11 @@ const SecureChatApp = () => {
 };
 
 // =============================================================================
-// FRIENDLYモード専用デバッグ関数
+// FRIENDLYモード専用デバッグ関数（Socket.IO統合強化）
 // =============================================================================
 if (window.DEBUG_MODE) {
   window.debugFriendlyMode = () => {
-    console.log('🔍 FRIENDLYモード完成版状態デバッグ:');
+    console.log('🔍 FRIENDLYモード Socket.IO統合強化版状態デバッグ:');
     console.log('API情報:', window.API.getEncryptionDebugInfo?.());
     console.log('Crypto状態:', {
       spaceKeys: window.Crypto?.spaceKeys?.size || 0,
@@ -741,7 +995,7 @@ if (window.DEBUG_MODE) {
   };
   
   window.testFriendlyModeComplete = async () => {
-    console.log('🧪 FRIENDLYモード完成版総合テスト開始...');
+    console.log('🧪 FRIENDLYモード Socket.IO統合強化版総合テスト開始...');
     
     // 1. E2Eテスト実行
     if (window.E2ETestSuite) {
@@ -761,7 +1015,7 @@ if (window.DEBUG_MODE) {
       await window.Crypto.testFriendlyEncryption();
     }
     
-    console.log('🎉 FRIENDLYモード完成版総合テスト完了！');
+    console.log('🎉 FRIENDLYモード Socket.IO統合強化版総合テスト完了！');
   };
   
   window.optimizeFriendlyMode = () => {
@@ -773,7 +1027,7 @@ if (window.DEBUG_MODE) {
 }
 
 // =============================================================================
-// アプリケーションマウント（FRIENDLYモード完成版）
+// アプリケーションマウント（FRIENDLYモード Socket.IO統合強化版）
 // =============================================================================
 document.addEventListener('DOMContentLoaded', () => {
   try {
@@ -785,7 +1039,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const root = ReactDOM.createRoot(rootElement);
     root.render(React.createElement(SecureChatApp));
     
-    window.Utils.log('success', 'FRIENDLYモード完成版アプリケーションマウント完了');
+    window.Utils.log('success', 'FRIENDLYモード Socket.IO統合強化版アプリケーションマウント完了');
     
     // FRIENDLYモード機能のテスト（開発環境のみ）
     if (window.DEBUG_MODE) {
@@ -802,7 +1056,7 @@ document.addEventListener('DOMContentLoaded', () => {
           window.Crypto.testFriendlyEncryption().then(result => {
             console.log(`🧪 FRIENDLYモード暗号化テスト: ${result.success ? '✅ 成功' : '❌ 失敗'}`);
             if (result.success) {
-              console.log('🎊 FRIENDLYモード完成版が正常に動作しています！');
+              console.log('🎊 FRIENDLYモード Socket.IO統合強化版が正常に動作しています！');
             }
           });
         }
@@ -816,7 +1070,7 @@ document.addEventListener('DOMContentLoaded', () => {
           'PerformanceOptimizer'
         ];
         
-        console.log('🔍 FRIENDLYモード完成版コンポーネント確認:');
+        console.log('🔍 FRIENDLYモード Socket.IO統合強化版コンポーネント確認:');
         components.forEach(comp => {
           const exists = !!window[comp];
           console.log(`  ${comp}: ${exists ? '✅' : '❌'}`);
@@ -826,12 +1080,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
   } catch (error) {
-    console.error('❌ FRIENDLYモード完成版マウント失敗:', error);
+    console.error('❌ FRIENDLYモード Socket.IO統合強化版マウント失敗:', error);
     
     document.getElementById('root').innerHTML = `
       <div style="min-height: 100vh; background: #111827; color: white; display: flex; align-items: center; justify-content: center; font-family: system-ui;">
         <div style="text-align: center; max-width: 500px; padding: 2rem;">
-          <h1 style="font-size: 1.5rem; margin-bottom: 1rem; color: #ef4444;">FRIENDLYモード完成版の読み込みに失敗しました</h1>
+          <h1 style="font-size: 1.5rem; margin-bottom: 1rem; color: #ef4444;">FRIENDLYモード Socket.IO統合強化版の読み込みに失敗しました</h1>
           <p style="color: #9ca3af; margin-bottom: 1.5rem;">ページを再読み込みするか、ブラウザのコンソールでエラーを確認してください</p>
           <button onclick="location.reload()" style="background: #3b82f6; padding: 0.75rem 1.5rem; border-radius: 0.5rem; border: none; color: white; cursor: pointer; margin-right: 1rem;">
             再読み込み
@@ -845,8 +1099,8 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 });
 
-console.log('✅ FRIENDLYモード完成版 app.js loaded:', {
-  version: 'FRIENDLYモード完成版',
+console.log('✅ FRIENDLYモード Socket.IO統合強化版 app.js loaded:', {
+  version: 'FRIENDLYモード Socket.IO統合強化版',
   features: [
     'ハイブリッド暗号化システム', 
     '統合UI', 
@@ -854,7 +1108,12 @@ console.log('✅ FRIENDLYモード完成版 app.js loaded:', {
     'パフォーマンス最適化',
     'セッション管理',
     'フォールバック復号化',
-    '暗号化状態可視化'
+    '暗号化状態可視化',
+    'リアルタイムセッション同期',
+    '暗号化レベル自動切り替え',
+    'キー交換サポート（基本版）',
+    'タイピング状態表示',
+    'ユーザー参加/退出通知'
   ],
   debugMode: window.DEBUG_MODE,
   timestamp: new Date().toISOString()

@@ -11,7 +11,7 @@ const morgan = require('morgan');
 const app = express();
 const server = http.createServer(app);
 
-// Socket.IO設定
+// Socket.IO設定（FRIENDLYモード対応）
 const io = socketIo(server, {
   cors: {
     origin: process.env.NODE_ENV === 'production' ? false : "*",
@@ -68,7 +68,8 @@ app.get('/health', (req, res) => {
       environment: process.env.NODE_ENV || 'development',
       database: result ? 'Connected' : 'Disconnected',
       version: process.env.npm_package_version || '1.0.0',
-      dbPath: dbPath.replace(process.cwd(), '.')
+      dbPath: dbPath.replace(process.cwd(), '.'),
+      friendlyMode: 'Socket.IO統合強化版'
     });
   } catch (error) {
     res.status(500).json({
@@ -91,7 +92,8 @@ app.get('/api/health', (req, res) => {
       database: result ? 'Connected' : 'Disconnected',
       version: process.env.npm_package_version || '1.0.0',
       dbPath: dbPath.replace(process.cwd(), '.'),
-      endpoint: '/api/health' // デバッグ用
+      endpoint: '/api/health', // デバッグ用
+      friendlyMode: 'Socket.IO統合強化版'
     });
   } catch (error) {
     res.status(500).json({
@@ -109,6 +111,13 @@ app.get('/api/stats', (req, res) => {
     const messagesCount = db.prepare('SELECT COUNT(*) as count FROM messages WHERE is_deleted = 0').get();
     const activeSpaces = db.prepare(`SELECT COUNT(*) as count FROM spaces WHERE last_activity_at > datetime('now', '-24 hours')`).get();
     
+    // Socket.IO統計情報を追加
+    const socketStats = {
+      connectedClients: connectedUsers.size,
+      activeSpaces: Array.from(io.sockets.adapter.rooms.keys()).filter(key => !key.startsWith('/')).length,
+      totalRooms: io.sockets.adapter.rooms.size
+    };
+    
     res.json({
       success: true,
       stats: {
@@ -116,7 +125,8 @@ app.get('/api/stats', (req, res) => {
         activeSpaces: activeSpaces.count,
         totalMessages: messagesCount.count,
         uptime: process.uptime(),
-        dbSize: require('fs').statSync(dbPath).size
+        dbSize: require('fs').statSync(dbPath).size,
+        ...socketStats
       },
       timestamp: new Date().toISOString()
     });
@@ -128,50 +138,332 @@ app.get('/api/stats', (req, res) => {
   }
 });
 
-// Socket.IO接続処理
+// =============================================================================
+// 🚀 Socket.IO FRIENDLYモード統合機能
+// =============================================================================
+
+// 接続ユーザー管理（FRIENDLYモード拡張）
 const connectedUsers = new Map();
 
+// 空間ごとのセッション管理
+const spaceSessionMap = new Map(); // spaceId -> Set<sessionId>
+
+// 暗号化キー交換管理（将来の実装用）
+const keyExchangeRequests = new Map();
+
 io.on('connection', (socket) => {
-  console.log(`🔌 ユーザー接続: ${socket.id}`);
+  console.log(`🔌 FRIENDLYモード ユーザー接続: ${socket.id}`);
   
-  // 空間参加
+  // =============================================================================
+  // 基本的な空間管理
+  // =============================================================================
+  
+  // 空間参加（FRIENDLYモード対応）
   socket.on('join-space', (spaceId) => {
-    if (!spaceId) return;
+    if (!spaceId) {
+      socket.emit('error', { message: '空間IDが必要です' });
+      return;
+    }
     
     socket.join(spaceId);
-    connectedUsers.set(socket.id, { spaceId, joinedAt: new Date() });
     
-    console.log(`📥 ユーザー ${socket.id} が空間 ${spaceId} に参加`);
+    // ユーザー情報を記録
+    const userInfo = {
+      spaceId,
+      joinedAt: new Date(),
+      lastActivity: new Date(),
+      sessionId: null // セッション情報で後で設定
+    };
+    connectedUsers.set(socket.id, userInfo);
     
-    // その空間の参加者数を通知
+    // 空間の参加者数を更新
     const roomSize = io.sockets.adapter.rooms.get(spaceId)?.size || 0;
-    io.to(spaceId).emit('room-info', { userCount: roomSize });
+    
+    console.log(`📥 FRIENDLYモード 空間参加: ${socket.id} → ${spaceId} (${roomSize}人)`);
+    
+    // 🆕 FRIENDLYモード: 空間情報を送信
+    socket.emit('space-joined', {
+      spaceId,
+      userCount: roomSize,
+      timestamp: new Date().toISOString()
+    });
+    
+    // 他の参加者に新規参加を通知
+    socket.to(spaceId).emit('user-joined', {
+      userId: socket.id,
+      userCount: roomSize,
+      timestamp: new Date().toISOString()
+    });
+    
+    // 空間全体に参加者数更新を通知
+    io.to(spaceId).emit('room-info', { 
+      userCount: roomSize,
+      activeUsers: Array.from(io.sockets.adapter.rooms.get(spaceId) || [])
+    });
   });
   
-  // 空間退出
+  // =============================================================================
+  // 🆕 FRIENDLYモード セッション管理
+  // =============================================================================
+  
+  // セッション情報登録（新規追加）
+  socket.on('session-info', (data) => {
+    if (!data.sessionId || !data.spaceId) {
+      socket.emit('error', { message: 'セッション情報が不完全です' });
+      return;
+    }
+    
+    console.log(`👤 セッション情報登録: ${socket.id} → ${data.sessionId.substring(0, 12)}...`);
+    
+    // ユーザー情報にセッションIDを追加
+    const userInfo = connectedUsers.get(socket.id);
+    if (userInfo) {
+      userInfo.sessionId = data.sessionId;
+      userInfo.lastActivity = new Date();
+    }
+    
+    // 空間のセッション管理に追加
+    if (!spaceSessionMap.has(data.spaceId)) {
+      spaceSessionMap.set(data.spaceId, new Set());
+    }
+    spaceSessionMap.get(data.spaceId).add(data.sessionId);
+    
+    // その空間の全ユーザーにセッション参加を通知
+    socket.to(data.spaceId).emit('session-joined', {
+      sessionId: data.sessionId,
+      spaceId: data.spaceId,
+      userId: socket.id,
+      timestamp: new Date().toISOString()
+    });
+    
+    // 🆕 セッション統計情報を送信
+    const activeSessions = spaceSessionMap.get(data.spaceId);
+    const sessionCount = activeSessions ? activeSessions.size : 1;
+    
+    console.log(`📊 空間 ${data.spaceId} セッション数: ${sessionCount}`);
+    
+    // 空間全体にセッション数更新を通知（暗号化レベル判定用）
+    io.to(data.spaceId).emit('session-count-updated', {
+      spaceId: data.spaceId,
+      sessionCount: sessionCount,
+      encryptionLevel: sessionCount > 1 ? 'hybrid' : 'deterministic',
+      timestamp: new Date().toISOString()
+    });
+    
+    socket.emit('session-registered', {
+      sessionId: data.sessionId,
+      spaceId: data.spaceId,
+      sessionCount: sessionCount
+    });
+  });
+  
+  // セッション活性度更新（新規追加）
+  socket.on('session-activity', (data) => {
+    const userInfo = connectedUsers.get(socket.id);
+    if (userInfo && userInfo.sessionId) {
+      userInfo.lastActivity = new Date();
+      
+      // 必要に応じて他のユーザーに活性度更新を通知
+      if (data.notifyOthers) {
+        socket.to(userInfo.spaceId).emit('session-activity-update', {
+          sessionId: userInfo.sessionId,
+          userId: socket.id,
+          timestamp: new Date().toISOString()
+        });
+      }
+    }
+  });
+  
+  // =============================================================================
+  // 🆕 FRIENDLYモード 暗号化レベル同期
+  // =============================================================================
+  
+  // 暗号化レベル変更通知（新規追加）
+  socket.on('encryption-level-changed', (data) => {
+    if (!data.spaceId || !data.encryptionLevel) return;
+    
+    console.log(`🔒 暗号化レベル変更: ${data.spaceId} → ${data.encryptionLevel}`);
+    
+    // 同じ空間の他のユーザーに暗号化レベル変更を通知
+    socket.to(data.spaceId).emit('encryption-level-updated', {
+      spaceId: data.spaceId,
+      encryptionLevel: data.encryptionLevel,
+      sessionCount: data.sessionCount || 1,
+      triggeredBy: socket.id,
+      timestamp: new Date().toISOString()
+    });
+  });
+  
+  // 🆕 暗号化キー交換要求（基本実装・将来の拡張用）
+  socket.on('key-exchange-request', (data) => {
+    if (!data.spaceId || !data.publicKey) {
+      socket.emit('error', { message: 'キー交換データが不完全です' });
+      return;
+    }
+    
+    console.log(`🔑 キー交換要求: ${socket.id} → ${data.spaceId}`);
+    
+    const exchangeId = `exchange_${Date.now()}_${socket.id.substring(0, 8)}`;
+    keyExchangeRequests.set(exchangeId, {
+      fromUser: socket.id,
+      spaceId: data.spaceId,
+      publicKey: data.publicKey,
+      timestamp: new Date(),
+      status: 'pending'
+    });
+    
+    // 同じ空間の他のユーザーにキー交換要求を転送
+    socket.to(data.spaceId).emit('key-exchange-request', {
+      exchangeId,
+      fromUser: socket.id,
+      publicKey: data.publicKey,
+      spaceId: data.spaceId,
+      timestamp: new Date().toISOString()
+    });
+    
+    // 要求者に確認を送信
+    socket.emit('key-exchange-initiated', {
+      exchangeId,
+      spaceId: data.spaceId,
+      status: 'sent'
+    });
+  });
+  
+  // キー交換応答（基本実装）
+  socket.on('key-exchange-response', (data) => {
+    if (!data.exchangeId || !data.publicKey) return;
+    
+    const exchangeRequest = keyExchangeRequests.get(data.exchangeId);
+    if (!exchangeRequest) {
+      socket.emit('error', { message: 'キー交換要求が見つかりません' });
+      return;
+    }
+    
+    console.log(`🔑 キー交換応答: ${socket.id} → ${data.exchangeId}`);
+    
+    // 要求者に応答を転送
+    const targetSocket = io.sockets.sockets.get(exchangeRequest.fromUser);
+    if (targetSocket) {
+      targetSocket.emit('key-exchange-response', {
+        exchangeId: data.exchangeId,
+        fromUser: socket.id,
+        publicKey: data.publicKey,
+        spaceId: exchangeRequest.spaceId,
+        timestamp: new Date().toISOString()
+      });
+    }
+    
+    // 交換完了をマーク
+    exchangeRequest.status = 'completed';
+    exchangeRequest.completedAt = new Date();
+    
+    socket.emit('key-exchange-completed', {
+      exchangeId: data.exchangeId,
+      status: 'completed'
+    });
+  });
+  
+  // =============================================================================
+  // メッセージ配信（FRIENDLYモード対応強化）
+  // =============================================================================
+  
+  // 新規メッセージ配信（強化版）
+  socket.on('new-message', (data) => {
+    if (!data.spaceId || !data.message) {
+      socket.emit('error', { message: 'メッセージデータが不完全です' });
+      return;
+    }
+    
+    console.log(`📨 FRIENDLYモード メッセージ配信: 空間 ${data.spaceId}`);
+    
+    // セッション活性度更新
+    const userInfo = connectedUsers.get(socket.id);
+    if (userInfo) {
+      userInfo.lastActivity = new Date();
+    }
+    
+    // 🆕 FRIENDLYモード: 暗号化情報を含む配信
+    const messageData = {
+      message: data.message,
+      from: socket.id,
+      spaceId: data.spaceId,
+      timestamp: new Date().toISOString(),
+      encryptionInfo: data.encryptionInfo || null,
+      sessionCount: spaceSessionMap.get(data.spaceId)?.size || 1
+    };
+    
+    // 送信者以外に配信
+    socket.to(data.spaceId).emit('message-received', messageData);
+    
+    // 送信確認を送信者に返す
+    socket.emit('message-sent-confirmation', {
+      messageId: data.message.id,
+      spaceId: data.spaceId,
+      timestamp: messageData.timestamp,
+      deliveredTo: (io.sockets.adapter.rooms.get(data.spaceId)?.size || 1) - 1
+    });
+  });
+  
+  // =============================================================================
+  // 空間退出とクリーンアップ
+  // =============================================================================
+  
+  // 空間退出（FRIENDLYモード対応）
   socket.on('leave-space', (spaceId) => {
     if (!spaceId) return;
     
     socket.leave(spaceId);
-    console.log(`📤 ユーザー ${socket.id} が空間 ${spaceId} から退出`);
+    
+    const userInfo = connectedUsers.get(socket.id);
+    if (userInfo && userInfo.sessionId) {
+      // セッション管理からも削除
+      const spaceSessions = spaceSessionMap.get(spaceId);
+      if (spaceSessions) {
+        spaceSessions.delete(userInfo.sessionId);
+        
+        if (spaceSessions.size === 0) {
+          spaceSessionMap.delete(spaceId);
+        }
+        
+        // セッション退出を他のユーザーに通知
+        socket.to(spaceId).emit('session-left', {
+          sessionId: userInfo.sessionId,
+          spaceId: spaceId,
+          userId: socket.id,
+          timestamp: new Date().toISOString()
+        });
+        
+        // セッション数更新通知
+        const remainingSessionCount = spaceSessions.size;
+        io.to(spaceId).emit('session-count-updated', {
+          spaceId: spaceId,
+          sessionCount: remainingSessionCount,
+          encryptionLevel: remainingSessionCount > 1 ? 'hybrid' : 'deterministic',
+          timestamp: new Date().toISOString()
+        });
+      }
+    }
+    
+    console.log(`📤 FRIENDLYモード 空間退出: ${socket.id} ← ${spaceId}`);
     
     // 参加者数更新
     const roomSize = io.sockets.adapter.rooms.get(spaceId)?.size || 0;
-    io.to(spaceId).emit('room-info', { userCount: roomSize });
-  });
-  
-  // 新規メッセージ配信
-  socket.on('new-message', (data) => {
-    if (!data.spaceId || !data.message) return;
+    io.to(spaceId).emit('room-info', { 
+      userCount: roomSize,
+      activeUsers: Array.from(io.sockets.adapter.rooms.get(spaceId) || [])
+    });
     
-    console.log(`📨 メッセージ配信: 空間 ${data.spaceId}`);
-    
-    // 送信者以外に配信
-    socket.to(data.spaceId).emit('message-received', {
-      message: data.message,
-      from: socket.id
+    // 他のユーザーに退出通知
+    socket.to(spaceId).emit('user-left', {
+      userId: socket.id,
+      userCount: roomSize,
+      timestamp: new Date().toISOString()
     });
   });
+  
+  // =============================================================================
+  // その他の機能
+  // =============================================================================
   
   // タイピング状態通知
   socket.on('typing', (data) => {
@@ -179,26 +471,91 @@ io.on('connection', (socket) => {
     
     socket.to(data.spaceId).emit('user-typing', {
       userId: socket.id,
-      isTyping: data.isTyping
+      isTyping: data.isTyping,
+      timestamp: new Date().toISOString()
     });
   });
   
-  // 接続切断
+  // 接続切断（FRIENDLYモード対応クリーンアップ）
   socket.on('disconnect', (reason) => {
-    console.log(`❌ ユーザー切断: ${socket.id} (理由: ${reason})`);
+    console.log(`❌ FRIENDLYモード ユーザー切断: ${socket.id} (理由: ${reason})`);
     
     const userInfo = connectedUsers.get(socket.id);
     if (userInfo) {
-      const roomSize = io.sockets.adapter.rooms.get(userInfo.spaceId)?.size || 0;
-      io.to(userInfo.spaceId).emit('room-info', { userCount: roomSize });
+      const { spaceId, sessionId } = userInfo;
+      
+      if (spaceId && sessionId) {
+        // セッション管理からクリーンアップ
+        const spaceSessions = spaceSessionMap.get(spaceId);
+        if (spaceSessions) {
+          spaceSessions.delete(sessionId);
+          
+          if (spaceSessions.size === 0) {
+            spaceSessionMap.delete(spaceId);
+          }
+          
+          // セッション退出を他のユーザーに通知
+          socket.to(spaceId).emit('session-left', {
+            sessionId: sessionId,
+            spaceId: spaceId,
+            userId: socket.id,
+            reason: 'disconnect',
+            timestamp: new Date().toISOString()
+          });
+          
+          // セッション数更新通知
+          const remainingSessionCount = spaceSessions.size;
+          io.to(spaceId).emit('session-count-updated', {
+            spaceId: spaceId,
+            sessionCount: remainingSessionCount,
+            encryptionLevel: remainingSessionCount > 1 ? 'hybrid' : 'deterministic',
+            reason: 'user_disconnect',
+            timestamp: new Date().toISOString()
+          });
+        }
+        
+        // 参加者数更新
+        const roomSize = io.sockets.adapter.rooms.get(spaceId)?.size || 0;
+        io.to(spaceId).emit('room-info', { 
+          userCount: roomSize,
+          activeUsers: Array.from(io.sockets.adapter.rooms.get(spaceId) || [])
+        });
+        
+        // 他のユーザーに退出通知
+        socket.to(spaceId).emit('user-left', {
+          userId: socket.id,
+          userCount: roomSize,
+          reason: 'disconnect',
+          timestamp: new Date().toISOString()
+        });
+      }
+      
       connectedUsers.delete(socket.id);
+    }
+    
+    // 進行中のキー交換要求をクリーンアップ
+    for (const [exchangeId, request] of keyExchangeRequests) {
+      if (request.fromUser === socket.id) {
+        keyExchangeRequests.delete(exchangeId);
+      }
     }
   });
   
+  // Socket.IOエラーハンドリング
   socket.on('error', (error) => {
-    console.error(`🐛 Socket.IOエラー (${socket.id}):`, error);
+    console.error(`🐛 FRIENDLYモード Socket.IOエラー (${socket.id}):`, error);
+    
+    socket.emit('error-response', {
+      error: error.message || 'Unknown error',
+      timestamp: new Date().toISOString(),
+      socketId: socket.id
+    });
   });
 });
+
+// =============================================================================
+// 定期的なクリーンアップ処理
+// =============================================================================
 
 // メッセージクリーンアップ処理（1分ごと）
 const cleanupExpiredMessages = () => {
@@ -217,7 +574,58 @@ const cleanupExpiredMessages = () => {
   }
 };
 
+// セッション管理クリーンアップ（10分ごと）
+const cleanupSessions = () => {
+  const now = new Date();
+  let cleanedSessions = 0;
+  
+  // 非アクティブセッションをクリーンアップ
+  for (const [socketId, userInfo] of connectedUsers) {
+    const inactiveTime = now - userInfo.lastActivity;
+    const maxInactiveTime = 30 * 60 * 1000; // 30分
+    
+    if (inactiveTime > maxInactiveTime) {
+      // 該当するSocket.IO接続があるかチェック
+      const socket = io.sockets.sockets.get(socketId);
+      if (!socket) {
+        // 接続が存在しない場合はクリーンアップ
+        if (userInfo.spaceId && userInfo.sessionId) {
+          const spaceSessions = spaceSessionMap.get(userInfo.spaceId);
+          if (spaceSessions) {
+            spaceSessions.delete(userInfo.sessionId);
+            cleanedSessions++;
+          }
+        }
+        connectedUsers.delete(socketId);
+      }
+    }
+  }
+  
+  // 空のセッション管理をクリーンアップ
+  for (const [spaceId, sessions] of spaceSessionMap) {
+    if (sessions.size === 0) {
+      spaceSessionMap.delete(spaceId);
+    }
+  }
+  
+  // キー交換要求クリーンアップ（1時間以上古い）
+  const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
+  let cleanedKeyExchanges = 0;
+  
+  for (const [exchangeId, request] of keyExchangeRequests) {
+    if (request.timestamp < oneHourAgo) {
+      keyExchangeRequests.delete(exchangeId);
+      cleanedKeyExchanges++;
+    }
+  }
+  
+  if (cleanedSessions > 0 || cleanedKeyExchanges > 0) {
+    console.log(`🧹 セッションクリーンアップ: ${cleanedSessions}セッション, ${cleanedKeyExchanges}キー交換`);
+  }
+};
+
 const cleanupInterval = setInterval(cleanupExpiredMessages, 60000);
+const sessionCleanupInterval = setInterval(cleanupSessions, 10 * 60000);
 
 // 404ハンドラー
 app.use('*', (req, res) => {
@@ -244,11 +652,16 @@ const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
 
 server.listen(PORT, HOST, () => {
-  console.log('\n🚀 セキュアチャットサーバーが起動しました');
+  console.log('\n🚀 FRIENDLYモード Socket.IO統合強化版サーバーが起動しました');
   console.log(`📡 URL: http://localhost:${PORT}`);
   console.log(`📊 環境: ${process.env.NODE_ENV || 'development'}`);
   console.log(`🗄️ データベース: ${dbPath}`);
   console.log(`⏰ 起動時刻: ${new Date().toLocaleString('ja-JP')}`);
+  console.log('🔗 FRIENDLYモード機能:');
+  console.log('  • リアルタイムセッション同期');
+  console.log('  • 暗号化レベル自動切り替え');
+  console.log('  • キー交換サポート (基本版)');
+  console.log('  • 拡張クリーンアップ機能');
   
   try {
     const spacesCount = db.prepare('SELECT COUNT(*) as count FROM spaces').get();
@@ -258,12 +671,12 @@ server.listen(PORT, HOST, () => {
     console.warn('⚠️ データベース状況取得に失敗:', error.message);
   }
   
-  console.log('\n✅ サーバー準備完了！');
+  console.log('\n✅ FRIENDLYモード Socket.IO統合サーバー準備完了！');
 });
 
 // グレースフルシャットダウン
 const gracefulShutdown = (signal) => {
-  console.log(`\n🛑 ${signal} を受信。サーバーを停止中...`);
+  console.log(`\n🛑 ${signal} を受信。FRIENDLYモード サーバーを停止中...`);
   
   server.close((err) => {
     if (err) {
@@ -274,6 +687,7 @@ const gracefulShutdown = (signal) => {
     console.log('✅ サーバーが正常に停止しました');
     
     clearInterval(cleanupInterval);
+    clearInterval(sessionCleanupInterval);
     
     if (db) {
       try {
