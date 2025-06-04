@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>セキュアチャット - E2EE対応版</title>
-    <meta name="description" content="エンドツーエンド暗号化対応のプライベートチャット空間">
+    <title>セキュアチャット - FRIENDLYモード完成版</title>
+    <meta name="description" content="FRIENDLYモード対応 エンドツーエンド暗号化チャットシステム">
     
     <!-- セキュリティヘッダー -->
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.socket.io https://cdn.tailwindcss.com; style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; connect-src 'self' ws: wss:;">
@@ -27,7 +27,7 @@
     <script src="https://cdn.tailwindcss.com"></script>
     
     <style>
-        /* カスタムスタイル */
+        /* FRIENDLYモード専用カスタムスタイル */
         .glass-effect {
             backdrop-filter: blur(10px);
             -webkit-backdrop-filter: blur(10px);
@@ -62,13 +62,24 @@
             outline: none;
         }
         
-        /* 暗号化インジケーター */
+        /* FRIENDLYモード暗号化インジケーター */
         .encryption-indicator {
             animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
         }
         
         .encryption-enabled {
             color: #10b981;
+            background: radial-gradient(circle, rgba(16, 185, 129, 0.1) 0%, transparent 70%);
+        }
+        
+        .encryption-hybrid {
+            color: #8b5cf6;
+            background: radial-gradient(circle, rgba(139, 92, 246, 0.1) 0%, transparent 70%);
+        }
+        
+        .encryption-deterministic {
+            color: #3b82f6;
+            background: radial-gradient(circle, rgba(59, 130, 246, 0.1) 0%, transparent 70%);
         }
         
         .encryption-disabled {
@@ -79,7 +90,7 @@
             color: #ef4444;
         }
         
-        /* 暗号化バッジ */
+        /* FRIENDLYモード暗号化バッジ */
         .crypto-badge {
             display: inline-flex;
             align-items: center;
@@ -88,12 +99,25 @@
             font-size: 0.75rem;
             border-radius: 9999px;
             border: 1px solid;
+            transition: all 0.2s ease;
         }
         
         .crypto-badge.enabled {
             background-color: rgba(16, 185, 129, 0.1);
             border-color: rgba(16, 185, 129, 0.3);
             color: #10b981;
+        }
+        
+        .crypto-badge.hybrid {
+            background-color: rgba(139, 92, 246, 0.1);
+            border-color: rgba(139, 92, 246, 0.3);
+            color: #8b5cf6;
+        }
+        
+        .crypto-badge.deterministic {
+            background-color: rgba(59, 130, 246, 0.1);
+            border-color: rgba(59, 130, 246, 0.3);
+            color: #3b82f6;
         }
         
         .crypto-badge.disabled {
@@ -107,15 +131,164 @@
             border-color: rgba(239, 68, 68, 0.3);
             color: #ef4444;
         }
+        
+        /* FRIENDLYモード専用アニメーション */
+        @keyframes friendlyPulse {
+            0%, 100% {
+                opacity: 1;
+                transform: scale(1);
+            }
+            50% {
+                opacity: 0.8;
+                transform: scale(1.05);
+            }
+        }
+        
+        .friendly-pulse {
+            animation: friendlyPulse 2s ease-in-out infinite;
+        }
+        
+        /* セッション数インジケーター */
+        .session-indicator {
+            position: relative;
+        }
+        
+        .session-indicator::after {
+            content: attr(data-count);
+            position: absolute;
+            top: -8px;
+            right: -8px;
+            background: #8b5cf6;
+            color: white;
+            font-size: 0.7rem;
+            font-weight: bold;
+            border-radius: 50%;
+            width: 18px;
+            height: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border: 2px solid #111827;
+        }
+        
+        /* パフォーマンス監視インジケーター */
+        .performance-indicator {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            z-index: 10000;
+            font-family: monospace;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(5px);
+        }
+        
+        .performance-indicator.hidden {
+            display: none;
+        }
+        
+        /* デバッグパネル専用スタイル */
+        .debug-panel {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.9);
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            z-index: 10001;
+            font-size: 12px;
+            border: 1px solid rgba(59, 130, 246, 0.3);
+            backdrop-filter: blur(10px);
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+            min-width: 280px;
+        }
+        
+        .debug-panel h4 {
+            margin: 0 0 10px 0;
+            color: #3b82f6;
+            font-size: 14px;
+            font-weight: bold;
+        }
+        
+        .debug-panel button {
+            display: block;
+            width: 100%;
+            margin: 5px 0;
+            padding: 8px 12px;
+            background: #374151;
+            color: white;
+            border: 1px solid #4b5563;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            font-size: 11px;
+        }
+        
+        .debug-panel button:hover {
+            background: #4b5563;
+            border-color: #6b7280;
+        }
+        
+        .debug-panel button.primary {
+            background: #3b82f6;
+            border-color: #2563eb;
+        }
+        
+        .debug-panel button.primary:hover {
+            background: #2563eb;
+        }
+        
+        .debug-panel button.success {
+            background: #10b981;
+            border-color: #059669;
+        }
+        
+        .debug-panel button.success:hover {
+            background: #059669;
+        }
+        
+        .debug-panel button.warning {
+            background: #f59e0b;
+            border-color: #d97706;
+        }
+        
+        .debug-panel button.warning:hover {
+            background: #d97706;
+        }
+        
+        .debug-panel .status {
+            font-size: 10px;
+            color: #9ca3af;
+            margin-top: 10px;
+            padding-top: 8px;
+            border-top: 1px solid #374151;
+        }
     </style>
 </head>
 <body class="bg-gray-900 text-white">
-    <!-- ローディング画面 -->
+    <!-- ローディング画面（FRIENDLYモード専用） -->
     <div id="loading" class="min-h-screen bg-gray-900 text-white flex items-center justify-center">
         <div class="text-center">
-            <div class="w-16 h-16 mx-auto mb-4 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
-            <h1 class="text-xl mb-2">セキュアチャット</h1>
-            <p class="text-gray-400 text-sm">暗号化システムを初期化中...</p>
+            <div class="w-20 h-20 mx-auto mb-6 relative">
+                <div class="w-20 h-20 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+                <div class="absolute inset-0 flex items-center justify-center">
+                    <div class="w-12 h-12 border-2 border-purple-400 border-b-transparent rounded-full animate-spin" style="animation-direction: reverse; animation-duration: 1.5s;"></div>
+                </div>
+            </div>
+            <h1 class="text-2xl mb-3 bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent font-bold">
+                FRIENDLYモード
+            </h1>
+            <p class="text-gray-400 text-sm mb-2">段階的E2EE暗号化システム初期化中...</p>
+            <div class="text-xs text-gray-500">
+                <div>🔑 決定的暗号化準備中</div>
+                <div>🔗 ハイブリッド暗号化準備中</div>
+                <div>🔄 フォールバック復号化準備中</div>
+            </div>
         </div>
     </div>
     
@@ -125,15 +298,37 @@
     <!-- エラーフォールバック -->
     <div id="error-fallback" style="display: none;" class="min-h-screen bg-gray-900 text-white flex items-center justify-center p-4">
         <div class="text-center max-w-md">
-            <h1 class="text-2xl mb-4 text-red-400">読み込みエラー</h1>
-            <p class="text-gray-300 mb-6">アプリケーションの読み込みに失敗しました</p>
-            <button onclick="location.reload()" class="bg-blue-600 hover:bg-blue-700 px-6 py-3 rounded-lg font-medium transition duration-200">
+            <h1 class="text-2xl mb-4 text-red-400">FRIENDLYモード読み込みエラー</h1>
+            <p class="text-gray-300 mb-6">FRIENDLYモード完成版の読み込みに失敗しました</p>
+            
+            <div class="mb-6 p-4 bg-blue-900/20 border border-blue-800/30 rounded-lg text-left">
+                <h3 class="font-bold mb-2 text-blue-300">FRIENDLYモードの特徴:</h3>
+                <ul class="text-sm text-gray-300 space-y-1">
+                    <li>• 段階的暗号化（ユーザビリティ重視）</li>
+                    <li>• 単独セッション: 決定的暗号化</li>
+                    <li>• 複数セッション: ハイブリッド暗号化</li>
+                    <li>• 後から入室でも全メッセージ読める</li>
+                    <li>• 暗号化状態の可視化</li>
+                </ul>
+            </div>
+            
+            <button onclick="location.reload()" class="bg-blue-600 hover:bg-blue-700 px-6 py-3 rounded-lg font-medium transition duration-200 mr-3">
                 再読み込み
+            </button>
+            <button onclick="console.log('Debug:', {crypto: !!window.Crypto, api: !!window.API, components: Object.keys(window).filter(k => k.includes('Component'))})" class="bg-gray-600 hover:bg-gray-700 px-6 py-3 rounded-lg font-medium transition duration-200">
+                デバッグ情報
             </button>
         </div>
     </div>
     
-    <!-- 設定スクリプト -->
+    <!-- パフォーマンス監視インジケーター（開発環境のみ） -->
+    <div id="performance-indicator" class="performance-indicator hidden">
+        <div id="perf-encryption">暗号化: --ms</div>
+        <div id="perf-fps">FPS: --</div>
+        <div id="perf-memory">メモリ: --%</div>
+    </div>
+    
+    <!-- 設定スクリプト（FRIENDLYモード専用） -->
     <script>
         // 環境設定
         window.API_BASE = 'http://localhost:3000/api';
@@ -141,7 +336,20 @@
         window.MESSAGE_EXPIRY_HOURS = '48';
         window.DEBUG_MODE = window.location.hostname === 'localhost' || window.location.search.includes('debug=true');
         
-        // Tailwind設定
+        // FRIENDLYモード専用設定
+        window.FRIENDLY_MODE = true;
+        window.FRIENDLY_MODE_VERSION = '1.0.0';
+        window.FRIENDLY_MODE_FEATURES = [
+            'hybrid_encryption',
+            'deterministic_encryption', 
+            'fallback_decryption',
+            'session_detection',
+            'encryption_visualization',
+            'performance_optimization',
+            'e2e_testing'
+        ];
+        
+        // Tailwind設定（FRIENDLYモード専用拡張）
         tailwind.config = {
             darkMode: 'class',
             theme: {
@@ -149,47 +357,118 @@
                     animation: {
                         'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
                         'spin-slow': 'spin 3s linear infinite',
+                        'friendly-pulse': 'friendlyPulse 2s ease-in-out infinite'
                     },
                     colors: {
                         'crypto-green': '#10b981',
                         'crypto-yellow': '#f59e0b', 
-                        'crypto-red': '#ef4444'
+                        'crypto-red': '#ef4444',
+                        'crypto-purple': '#8b5cf6',
+                        'crypto-blue': '#3b82f6',
+                        'friendly-primary': '#3b82f6',
+                        'friendly-secondary': '#8b5cf6',
+                        'friendly-accent': '#10b981'
+                    },
+                    fontFamily: {
+                        'friendly': ['system-ui', 'sans-serif']
                     }
                 }
             }
         };
         
-        // 初期化ログ
-        console.log('🚀 セキュアチャット E2EE対応版が読み込まれました');
+        // FRIENDLYモード初期化ログ
+        console.log('🚀 FRIENDLYモード完成版が読み込まれました');
         console.log('📡 API Base:', window.API_BASE);
         console.log('🔌 WebSocket URL:', window.SOCKET_URL);
         console.log('🔒 暗号化サポート:', !!(window.crypto && window.crypto.subtle));
         console.log('🐛 デバッグモード:', window.DEBUG_MODE);
+        console.log('✨ FRIENDLYモード機能:', window.FRIENDLY_MODE_FEATURES);
         
         // Web Crypto API サポート確認
         if (!(window.crypto && window.crypto.subtle)) {
             console.warn('⚠️ Web Crypto API がサポートされていません - 平文通信になります');
         } else {
-            console.log('✅ Web Crypto API サポート確認完了');
+            console.log('✅ FRIENDLYモード Web Crypto API サポート確認完了');
+        }
+        
+        // パフォーマンス監視インジケーターの初期化
+        if (window.DEBUG_MODE) {
+            const perfIndicator = document.getElementById('performance-indicator');
+            perfIndicator.classList.remove('hidden');
+            
+            // パフォーマンス情報更新
+            setInterval(() => {
+                if (window.PerformanceOptimizer) {
+                    const report = window.PerformanceOptimizer.generateReport();
+                    if (report) {
+                        document.getElementById('perf-encryption').textContent = `暗号化: ${report.encryption?.avgTime || '--'}`;
+                        document.getElementById('perf-fps').textContent = `FPS: ${report.ui?.avgFPS || '--'}`;
+                        document.getElementById('perf-memory').textContent = `メモリ: ${report.memory?.usage || '--'}`;
+                    }
+                }
+            }, 5000);
         }
     </script>
     
-    <!-- モジュール読み込み（依存関係順） -->
+    <!-- モジュール読み込み（FRIENDLYモード完成版依存関係順） -->
+    
+    <!-- 基盤モジュール -->
     <script src="/js/modules/icons.js"></script>
     <script src="/js/modules/utils.js"></script>
     <script src="/js/modules/sessionManager.js"></script>
-    <script src="/js/modules/crypto.js"></script>  <!-- 新規追加 -->
+    
+    <!-- 暗号化モジュール（FRIENDLYモード対応） -->
+    <script src="/js/modules/crypto.js"></script>
+    
+    <!-- API通信モジュール（FRIENDLYモード対応） -->
     <script src="/js/modules/api.js"></script>
+    
+    <!-- FRIENDLYモード専用拡張コンポーネント -->
+    <script>
+        // 動的読み込み（エラー処理付き）
+        const loadScript = (src, name) => {
+            const script = document.createElement('script');
+            script.src = src;
+            script.onload = () => console.log(`✅ ${name} loaded`);
+            script.onerror = () => console.warn(`⚠️ ${name} load failed, using fallback`);
+            document.head.appendChild(script);
+        };
+        
+        // 拡張コンポーネントの読み込み
+        loadScript('/js/components/EncryptionStatus.js', 'EncryptionStatus Component');
+        loadScript('/js/components/EnhancedMessageDisplay.js', 'EnhancedMessageDisplay Component');
+        loadScript('/js/components/IntegratedChatUI.js', 'IntegratedChatUI Component');
+    </script>
+    
+    <!-- 既存のコンポーネント（フォールバック用） -->
     <script src="/js/components/Login.js"></script>
     <script src="/js/components/Chat.js"></script>
     
-    <!-- メインアプリケーション -->
+    <!-- テストスイート（開発環境のみ） -->
+    <script>
+        if (window.DEBUG_MODE) {
+            const loadTestScript = (src, name) => {
+                const script = document.createElement('script');
+                script.src = src;
+                script.onload = () => console.log(`🧪 ${name} test suite loaded`);
+                script.onerror = () => console.warn(`⚠️ ${name} test suite load failed`);
+                document.head.appendChild(script);
+            };
+            
+            loadTestScript('/js/test/E2ETestSuite.js', 'E2E');
+            loadTestScript('/js/performance/PerformanceOptimizer.js', 'Performance');
+        }
+    </script>
+    
+    <!-- メインアプリケーション（FRIENDLYモード完成版） -->
     <script src="/js/app.js"></script>
     
-    <!-- 初期化・エラーハンドリング -->
+    <!-- 初期化・エラーハンドリング（FRIENDLYモード対応） -->
     <script>
-        // ローディング画面の制御
+        // FRIENDLYモード専用初期化
         document.addEventListener('DOMContentLoaded', () => {
+            console.log('🎯 FRIENDLYモード完成版 DOM読み込み完了');
+            
             setTimeout(() => {
                 const loading = document.getElementById('loading');
                 if (loading) {
@@ -200,44 +479,81 @@
                 if (!document.getElementById('root').hasChildNodes()) {
                     setTimeout(() => {
                         if (!document.getElementById('root').hasChildNodes()) {
-                            console.error('❌ React アプリケーションの読み込みに失敗');
+                            console.error('❌ FRIENDLYモード React アプリケーションの読み込みに失敗');
                             document.getElementById('error-fallback').style.display = 'flex';
                         }
                     }, 2000);
                 }
-            }, 500);
+            }, 1000);
         });
         
-        // グローバルエラーハンドリング
+        // FRIENDLYモード専用エラーハンドリング
         window.addEventListener('error', (e) => {
-            console.error('🐛 JavaScript エラー:', e.error);
+            console.error('🐛 FRIENDLYモード JavaScript エラー:', e.error);
             
             // 暗号化関連のエラーの場合は特別な処理
             if (e.error?.message?.includes('crypto') || e.error?.message?.includes('encryption')) {
-                console.warn('🔒 暗号化エラーが発生しました - 平文モードに切り替えます');
+                console.warn('🔒 FRIENDLYモード暗号化エラー - フォールバックモードに切り替え');
             }
         });
         
         window.addEventListener('unhandledrejection', (e) => {
-            console.error('🐛 Promise エラー:', e.reason);
+            console.error('🐛 FRIENDLYモード Promise エラー:', e.reason);
         });
         
-        // パフォーマンス監視（開発環境のみ）
+        // FRIENDLYモードパフォーマンス監視（開発環境のみ）
         if (window.DEBUG_MODE && window.performance) {
             window.addEventListener('load', () => {
                 setTimeout(() => {
                     const loadTime = window.performance.timing.loadEventEnd - window.performance.timing.navigationStart;
-                    console.log(`⚡ ページ読み込み時間: ${loadTime}ms`);
+                    console.log(`⚡ FRIENDLYモード ページ読み込み時間: ${loadTime}ms`);
+                    
+                    // 追加の統計情報
+                    if (window.performance.memory) {
+                        const memory = window.performance.memory;
+                        console.log('💾 初期メモリ使用量:', {
+                            used: (memory.usedJSHeapSize / 1024 / 1024).toFixed(2) + 'MB',
+                            total: (memory.totalJSHeapSize / 1024 / 1024).toFixed(2) + 'MB',
+                            limit: (memory.jsHeapSizeLimit / 1024 / 1024).toFixed(2) + 'MB'
+                        });
+                    }
                 }, 0);
             });
         }
         
-        // サービスワーカー登録（将来の実装）
+        // FRIENDLYモード専用デバッグパネル（開発環境のみ）
+        if (window.DEBUG_MODE) {
+            setTimeout(() => {
+                const debugPanel = document.createElement('div');
+                debugPanel.className = 'debug-panel';
+                debugPanel.innerHTML = `
+                    <h4>🧪 FRIENDLYモード完成版</h4>
+                    <button class="primary" onclick="window.testFriendlyModeComplete?.()">🎯 完全テスト実行</button>
+                    <button class="success" onclick="window.optimizeFriendlyMode?.()">⚡ 最適化実行</button>
+                    <button class="warning" onclick="window.benchmarkFriendlyMode?.()">📊 ベンチマーク</button>
+                    <button onclick="window.debugFriendlyMode?.()">🔍 状態デバッグ</button>
+                    <button onclick="window.Crypto?.testFriendlyEncryption?.()">🔒 暗号化テスト</button>
+                    <button onclick="window.E2ETestSuite?.runIndividualTest?.('crypto')">🧪 Crypto単体</button>
+                    <button onclick="window.E2ETestSuite?.runIndividualTest?.('ui')">🎨 UI単体</button>
+                    <button onclick="console.clear()">🗑️ コンソールクリア</button>
+                    <div class="status">
+                        Version: ${window.FRIENDLY_MODE_VERSION || '1.0.0'}<br>
+                        Features: ${window.FRIENDLY_MODE_FEATURES?.length || 0}個<br>
+                        Mode: FRIENDLYモード完成版
+                    </div>
+                `;
+                document.body.appendChild(debugPanel);
+                
+                console.log('🛠️ FRIENDLYモード開発デバッグパネル表示');
+            }, 3000);
+        }
+        
+        // サービスワーカー登録（将来の実装・HTTPS環境のみ）
         if ('serviceWorker' in navigator && window.location.protocol === 'https:') {
             navigator.serviceWorker.register('/sw.js').then((registration) => {
-                console.log('✅ Service Worker 登録成功:', registration.scope);
+                console.log('✅ FRIENDLYモード Service Worker 登録成功:', registration.scope);
             }).catch((error) => {
-                console.log('❌ Service Worker 登録失敗:', error);
+                console.log('❌ FRIENDLYモード Service Worker 登録失敗:', error);
             });
         }
     </script>
