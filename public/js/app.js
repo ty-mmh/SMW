@@ -229,163 +229,312 @@ const SecureChatApp = () => {
       window.Utils.log('info', 'FRIENDLYモード Socket.IO統合強化版接続初期化', { spaceId: currentSpace.id });
       setConnectionStatus('connecting');
       
+      // 🆕 接続統計管理
+      const connectionStats = {
+        attempts: 0,
+        successfulConnections: 0,
+        lastSuccessTime: null,
+        errorCounts: {
+          connect_error: 0,
+          disconnect: 0,
+          timeout: 0
+        }
+      };
+      
+      // 🆕 自動復旧管理
+      const recoveryManager = {
+        isRecovering: false,
+        maxRetries: 5,
+        retryDelay: 1000,
+        backoffMultiplier: 1.5,
+        lastRecoveryAttempt: null
+      };
+      
       const newSocket = io(window.SOCKET_URL, {
         transports: ['websocket', 'polling'],
         timeout: 10000,
         reconnection: true,
         reconnectionAttempts: 5,
-        reconnectionDelay: 1000
+        reconnectionDelay: 1000,
+        reconnectionDelayMax: 10000,
+        maxReconnectionAttempts: 10,
+        // 🆕 強化された接続オプション
+        forceNew: false,
+        multiplex: true,
+        autoConnect: true
       });
-      
+
       // =============================================================================
-      // 基本接続イベント
+      // 🆕 強化された接続状態管理
       // =============================================================================
       
-      newSocket.on('connect', () => {
-        window.Utils.log('success', 'FRIENDLYモード Socket.IO統合強化版接続成功');
+      const handleConnectionSuccess = () => {
+        connectionStats.attempts++;
+        connectionStats.successfulConnections++;
+        connectionStats.lastSuccessTime = new Date();
+        recoveryManager.isRecovering = false;
+        
+        window.Utils.log('success', 'Socket.IO接続成功', {
+          attempts: connectionStats.attempts,
+          successRate: (connectionStats.successfulConnections / connectionStats.attempts * 100).toFixed(1) + '%'
+        });
+        
         setConnectionStatus('connected');
+        setError(''); // 接続成功時にエラーをクリア
+        
+        // 基本的な空間参加
         newSocket.emit('join-space', currentSpace.id);
         
-        // 🆕 セッション情報をサーバーに送信（強化版）
+        // セッション情報送信（強化版）
         if (window.SessionManager) {
           const currentSession = window.SessionManager.getCurrentSession();
           if (currentSession) {
             newSocket.emit('session-info', {
               sessionId: currentSession.sessionId,
               spaceId: currentSpace.id,
-              timestamp: new Date().toISOString()
+              timestamp: new Date().toISOString(),
+              recoveryMode: recoveryManager.isRecovering,
+              connectionStats: {
+                attempts: connectionStats.attempts,
+                successRate: connectionStats.successfulConnections / connectionStats.attempts
+              }
             });
           }
         }
-      });
+      };
 
-      // =============================================================================
-      // 🆕 FRIENDLYモード専用イベント処理
-      // =============================================================================
-      
-      // 空間参加完了
-      newSocket.on('space-joined', (data) => {
-        window.Utils.log('success', 'FRIENDLYモード 空間参加完了', data);
-        setConnectionStatus('connected');
-      });
-      
-      // セッション登録完了
-      newSocket.on('session-registered', (data) => {
-        window.Utils.log('success', 'セッション登録完了', data);
-        
-        // セッション数の更新
-        if (data.sessionCount) {
-          setSessionCount(data.sessionCount);
-          
-          // 暗号化レベルの更新
-          const newEncryptionLevel = data.sessionCount > 1 ? 'hybrid' : 'deterministic';
-          setEncryptionInfo(prev => ({
-            ...prev,
-            sessionCount: data.sessionCount,
-            encryptionLevel: newEncryptionLevel,
-            lastUpdate: new Date()
-          }));
+      // 🆕 自動復旧処理
+      const attemptRecovery = async (reason) => {
+        if (recoveryManager.isRecovering) {
+          window.Utils.log('debug', 'Recovery already in progress, skipping');
+          return;
         }
-      });
-      
-      // セッション数更新（リアルタイム）
-      newSocket.on('session-count-updated', (data) => {
-        window.Utils.log('info', 'リアルタイム セッション数更新', data);
         
-        if (data.spaceId === currentSpace.id) {
-          setSessionCount(data.sessionCount);
-          
-          // 暗号化レベルの自動更新
-          setEncryptionInfo(prev => ({
-            ...prev,
-            sessionCount: data.sessionCount,
-            encryptionLevel: data.encryptionLevel,
-            lastUpdate: new Date(),
-            autoUpdated: true,
-            updateReason: data.reason || 'session_change'
-          }));
-          
-          // SessionManagerにも反映
-          if (window.SessionManager && data.sessionCount > 1) {
-            // 他のセッションが参加した場合の処理
-            window.Utils.log('debug', 'SessionManager セッション数同期', {
-              currentCount: data.sessionCount,
-              encryptionLevel: data.encryptionLevel
+        recoveryManager.isRecovering = true;
+        recoveryManager.lastRecoveryAttempt = new Date();
+        
+        window.Utils.log('info', `Socket.IO自動復旧開始: ${reason}`);
+        setConnectionStatus('recovering');
+        
+        // 段階的復旧処理
+        for (let attempt = 1; attempt <= recoveryManager.maxRetries; attempt++) {
+          try {
+            window.Utils.log('debug', `復旧試行 ${attempt}/${recoveryManager.maxRetries}`);
+            
+            // 接続状態確認
+            if (newSocket.connected) {
+              window.Utils.log('success', '接続が既に復旧済み');
+              handleConnectionSuccess();
+              return;
+            }
+            
+            // 強制再接続
+            if (!newSocket.connected) {
+              newSocket.connect();
+            }
+            
+            // 接続確認の待機
+            await new Promise((resolve, reject) => {
+              const timeout = setTimeout(() => {
+                reject(new Error('Connection timeout'));
+              }, 5000);
+              
+              const onConnect = () => {
+                clearTimeout(timeout);
+                newSocket.off('connect', onConnect);
+                resolve();
+              };
+              
+              newSocket.on('connect', onConnect);
             });
+            
+            // 復旧成功
+            window.Utils.log('success', `Socket.IO復旧成功 (試行${attempt}回目)`);
+            handleConnectionSuccess();
+            return;
+            
+          } catch (error) {
+            window.Utils.log('warn', `復旧試行${attempt}失敗: ${error.message}`);
+            
+            if (attempt === recoveryManager.maxRetries) {
+              // 最終試行失敗
+              window.Utils.log('error', 'Socket.IO復旧失敗 - 手動再接続が必要');
+              setConnectionStatus('failed');
+              setError('🔌 リアルタイム機能に接続できません。ページを再読み込みしてください。');
+              recoveryManager.isRecovering = false;
+              return;
+            }
+            
+            // リトライ遅延
+            const delay = recoveryManager.retryDelay * Math.pow(recoveryManager.backoffMultiplier, attempt - 1);
+            await new Promise(resolve => setTimeout(resolve, delay));
           }
         }
-      });
+      };
+
+      // =============================================================================
+      // 🆕 強化されたエラーハンドリング
+      // =============================================================================
       
-      // 暗号化レベル更新（他のユーザーから）
-      newSocket.on('encryption-level-updated', (data) => {
-        window.Utils.log('info', '他ユーザーからの暗号化レベル更新', data);
+      newSocket.on('connect', handleConnectionSuccess);
+      
+      newSocket.on('disconnect', (reason) => {
+        connectionStats.errorCounts.disconnect++;
+        window.Utils.log('warn', 'Socket.IO接続切断', { 
+          reason,
+          disconnectCount: connectionStats.errorCounts.disconnect 
+        });
         
-        if (data.spaceId === currentSpace.id) {
-          setEncryptionInfo(prev => ({
-            ...prev,
-            encryptionLevel: data.encryptionLevel,
-            sessionCount: data.sessionCount || prev.sessionCount,
-            lastUpdate: new Date(),
-            updatedBy: 'other_user',
-            triggeredBy: data.triggeredBy
-          }));
-        }
-      });
-      
-      // =============================================================================
-      // セッション管理イベント（強化版）
-      // =============================================================================
-      
-      // セッション参加通知
-      newSocket.on('session-joined', (data) => {
-        window.Utils.log('info', 'セッション参加通知', data);
-        if (window.SessionManager && data.sessionId && data.spaceId === currentSpace.id) {
-          window.SessionManager.addSessionToSpace(data.spaceId, data.sessionId);
-          
-          // UIに通知
-          window.Utils.log('info', '🎉 新しいユーザーが参加しました', {
-            sessionId: data.sessionId.substring(0, 12) + '...'
-          });
+        setConnectionStatus('disconnected');
+        setRealtimeUsers([]);
+        setTypingUsers([]);
+        
+        // 自動復旧判定
+        if (reason !== 'io client disconnect' && reason !== 'io server disconnect') {
+          // 予期しない切断の場合は自動復旧
+          setTimeout(() => {
+            attemptRecovery(`disconnect: ${reason}`);
+          }, 2000);
         }
       });
 
-      // セッション退出通知
-      newSocket.on('session-left', (data) => {
-        window.Utils.log('info', 'セッション退出通知', data);
-        if (window.SessionManager && data.sessionId && data.spaceId === currentSpace.id) {
-          window.SessionManager.removeSessionFromSpace(data.spaceId, data.sessionId);
-          
-          // UIに通知
-          window.Utils.log('info', '👋 ユーザーが退出しました', {
-            sessionId: data.sessionId.substring(0, 12) + '...'
-          });
+      newSocket.on('connect_error', (error) => {
+        connectionStats.attempts++;
+        connectionStats.errorCounts.connect_error++;
+        
+        window.Utils.log('error', 'Socket.IO接続エラー', {
+          error: error.message,
+          attempts: connectionStats.attempts,
+          errorCount: connectionStats.errorCounts.connect_error
+        });
+        
+        setConnectionStatus('error');
+        
+        // 🆕 エラー種別による対応分岐
+        if (error.message.includes('timeout')) {
+          connectionStats.errorCounts.timeout++;
+          setError('⏰ 接続がタイムアウトしました。ネットワーク環境を確認してください。');
+        } else if (error.message.includes('refused')) {
+          setError('🚫 サーバーに接続できません。しばらく時間をおいて再試行してください。');
+        } else {
+          setError(`🔌 接続エラー: ${error.message}`);
+        }
+        
+        // 一定時間後に自動復旧を試行
+        if (connectionStats.errorCounts.connect_error <= 3) {
+          setTimeout(() => {
+            attemptRecovery(`connect_error: ${error.message}`);
+          }, 3000);
         }
       });
-      
-      // ユーザー参加・退出
-      newSocket.on('user-joined', (data) => {
-        window.Utils.log('info', 'ユーザー参加', data);
-        setRealtimeUsers(prev => [...prev.filter(u => u.userId !== data.userId), {
-          userId: data.userId,
-          joinedAt: data.timestamp,
-          status: 'joined'
-        }]);
+
+      newSocket.on('reconnect', (attemptNumber) => {
+        window.Utils.log('success', 'Socket.IO再接続成功', { attemptNumber });
+        handleConnectionSuccess();
+        
+        // 🆕 再接続後の状態復旧
+        restoreSessionState();
       });
-      
-      newSocket.on('user-left', (data) => {
-        window.Utils.log('info', 'ユーザー退出', data);
-        setRealtimeUsers(prev => prev.filter(u => u.userId !== data.userId));
+
+      newSocket.on('reconnect_failed', () => {
+        window.Utils.log('error', 'Socket.IO再接続失敗');
+        setConnectionStatus('failed');
+        setError('🔄 自動再接続に失敗しました。手動で再接続してください。');
+        
+        // 手動再接続ボタンの表示
+        setEncryptionInfo(prev => ({
+          ...prev,
+          showManualReconnect: true
+        }));
       });
-      
+
       // =============================================================================
-      // メッセージ受信（FRIENDLYモード対応強化）
+      // 🆕 セッション状態復旧
+      // =============================================================================
+      
+      const restoreSessionState = () => {
+        window.Utils.log('info', 'セッション状態復旧開始');
+        
+        // 空間に再参加
+        newSocket.emit('join-space', currentSpace.id);
+        
+        // セッション情報の再送信
+        if (window.SessionManager) {
+          const currentSession = window.SessionManager.getCurrentSession();
+          if (currentSession) {
+            newSocket.emit('session-info', {
+              sessionId: currentSession.sessionId,
+              spaceId: currentSpace.id,
+              timestamp: new Date().toISOString(),
+              isReconnection: true
+            });
+          }
+          
+          // Socket.IOインスタンスを SessionManager に設定
+          if (window.SessionManager.setSocket) {
+            window.SessionManager.setSocket(newSocket);
+          }
+        }
+        
+        // 暗号化レベルの再同期
+        if (encryptionStatus === 'enabled' && sessionCount > 0) {
+          const currentLevel = sessionCount > 1 ? 'hybrid' : 'deterministic';
+          newSocket.emit('encryption-level-changed', {
+            spaceId: currentSpace.id,
+            encryptionLevel: currentLevel,
+            sessionCount: sessionCount,
+            timestamp: new Date().toISOString(),
+            isReconnection: true
+          });
+        }
+      };
+
+      // 🆕 手動再接続機能
+      window.manualReconnect = () => {
+        window.Utils.log('info', '手動再接続実行');
+        setError('');
+        setEncryptionInfo(prev => ({
+          ...prev,
+          showManualReconnect: false
+        }));
+        
+        attemptRecovery('manual_reconnect');
+      };
+
+      // =============================================================================
+      // 🆕 接続品質監視
+      // =============================================================================
+      
+      const connectionMonitor = setInterval(() => {
+        if (newSocket.connected) {
+          // ping-pong による接続品質確認
+          const pingStart = Date.now();
+          newSocket.emit('ping', pingStart);
+          
+          newSocket.once('pong', (timestamp) => {
+            const latency = Date.now() - timestamp;
+            window.Utils.log('debug', `Socket.IO レイテンシ: ${latency}ms`);
+            
+            // 高いレイテンシの警告
+            if (latency > 2000) {
+              window.Utils.log('warn', `高いレイテンシを検出: ${latency}ms`);
+              setConnectionStatus('slow');
+            } else if (connectionStatus === 'slow' && latency < 1000) {
+              setConnectionStatus('connected');
+            }
+          });
+        }
+      }, 30000); // 30秒ごと
+
+      // =============================================================================
+      // 🆕 拡張されたメッセージ処理
       // =============================================================================
       
       newSocket.on('message-received', async (data) => {
-        window.Utils.log('info', 'FRIENDLYモード統合強化版 メッセージ受信', { from: data.from });
-        
-        if (data && data.message) {
-          try {
+        try {
+          window.Utils.log('info', 'FRIENDLYモード統合強化版 メッセージ受信', { from: data.from });
+          
+          if (data && data.message) {
             let receivedMessage = {
               ...data.message,
               timestamp: new Date(data.message.timestamp),
@@ -393,24 +542,52 @@ const SecureChatApp = () => {
               encryptionInfo: data.encryptionInfo || null
             };
 
-            // FRIENDLYモード復号化処理
+            // 🆕 強化された復号化処理
             if (receivedMessage.encrypted && window.API.encryptionSystem) {
               try {
+                let decryptedText;
+                
                 // ハイブリッド復号化を試行
                 if (receivedMessage.encryptionType === 'hybrid' && window.Crypto.decryptMessageWithFallback) {
-                  const decryptedText = await window.Crypto.decryptMessageWithFallback(receivedMessage, currentSpace.id);
-                  receivedMessage.text = decryptedText;
+                  decryptedText = await window.Crypto.decryptMessageWithFallback(receivedMessage, currentSpace.id);
                   window.Utils.log('success', 'ハイブリッド復号化成功');
                 } else {
                   // 決定的復号化
-                  const decryptedText = await window.API.decryptMessage(receivedMessage);
-                  receivedMessage.text = decryptedText;
+                  decryptedText = await window.API.decryptMessage(receivedMessage);
                   window.Utils.log('success', '決定的復号化成功');
                 }
+                
+                receivedMessage.text = decryptedText;
+                
               } catch (decryptError) {
                 window.Utils.log('warn', 'リアルタイム復号化失敗', decryptError.message);
-                receivedMessage.text = '[リアルタイム復号化に失敗しました]';
-                receivedMessage.encryptionType = 'error';
+                
+                // 🆕 復号化失敗時の詳細処理
+                if (decryptError.message.includes('key')) {
+                  receivedMessage.text = '🔑 暗号化キーを同期中... しばらくお待ちください';
+                  receivedMessage.encryptionType = 'key_sync_needed';
+                  
+                  // 5秒後に復号化を再試行
+                  setTimeout(async () => {
+                    try {
+                      const retryDecrypted = await window.API.decryptMessage(receivedMessage);
+                      
+                      setMessages(prev => prev.map(msg => 
+                        msg.id === receivedMessage.id ? 
+                          { ...msg, text: retryDecrypted, encryptionType: 'deterministic' } : 
+                          msg
+                      ));
+                      
+                      window.Utils.log('success', '遅延復号化成功');
+                    } catch (retryError) {
+                      window.Utils.log('error', '遅延復号化も失敗', retryError.message);
+                    }
+                  }, 5000);
+                  
+                } else {
+                  receivedMessage.text = '[リアルタイム復号化に失敗しました]';
+                  receivedMessage.encryptionType = 'error';
+                }
               }
             }
             
@@ -420,150 +597,37 @@ const SecureChatApp = () => {
               
               return [...prev, receivedMessage].sort((a, b) => a.timestamp - b.timestamp);
             });
-          } catch (error) {
-            window.Utils.log('error', 'リアルタイムメッセージ処理エラー', error.message);
           }
-        }
-      });
-      
-      // メッセージ送信確認
-      newSocket.on('message-sent-confirmation', (data) => {
-        window.Utils.log('success', 'メッセージ送信確認', {
-          messageId: data.messageId,
-          deliveredTo: data.deliveredTo
-        });
-      });
-
-      // =============================================================================
-      // 🆕 キー交換機能（基本実装）
-      // =============================================================================
-      
-      // キー交換要求受信
-      newSocket.on('key-exchange-request', (data) => {
-        window.Utils.log('info', 'キー交換要求受信', data);
-        
-        setKeyExchangeStatus(prev => ({
-          ...prev,
-          [data.exchangeId]: {
-            status: 'received',
-            fromUser: data.fromUser,
-            publicKey: data.publicKey,
-            timestamp: data.timestamp
-          }
-        }));
-        
-        // 将来: UIでユーザーに確認を求める
-        console.log('🔑 キー交換要求を受信しました:', data.exchangeId);
-      });
-      
-      // キー交換応答受信
-      newSocket.on('key-exchange-response', (data) => {
-        window.Utils.log('info', 'キー交換応答受信', data);
-        
-        setKeyExchangeStatus(prev => ({
-          ...prev,
-          [data.exchangeId]: {
-            ...prev[data.exchangeId],
-            status: 'responded',
-            responsePublicKey: data.publicKey,
-            responseFrom: data.fromUser
-          }
-        }));
-      });
-      
-      // キー交換完了
-      newSocket.on('key-exchange-completed', (data) => {
-        window.Utils.log('success', 'キー交換完了', data);
-        
-        setKeyExchangeStatus(prev => ({
-          ...prev,
-          [data.exchangeId]: {
-            ...prev[data.exchangeId],
-            status: 'completed',
-            completedAt: new Date().toISOString()
-          }
-        }));
-      });
-
-      // =============================================================================
-      // その他の機能強化
-      // =============================================================================
-      
-      // タイピング状態
-      newSocket.on('user-typing', (data) => {
-        setTypingUsers(prev => {
-          if (data.isTyping) {
-            return [...prev.filter(u => u.userId !== data.userId), {
-              userId: data.userId,
-              timestamp: data.timestamp
-            }];
-          } else {
-            return prev.filter(u => u.userId !== data.userId);
-          }
-        });
-      });
-      
-      // 部屋情報更新
-      newSocket.on('room-info', (data) => {
-        window.Utils.log('debug', '部屋情報更新', data);
-        // 必要に応じて UI に反映
-      });
-
-      // =============================================================================
-      // エラーハンドリング
-      // =============================================================================
-      
-      newSocket.on('disconnect', (reason) => {
-        window.Utils.log('warn', 'FRIENDLYモード Socket.IO接続切断', { reason });
-        setConnectionStatus('disconnected');
-        setRealtimeUsers([]);
-        setTypingUsers([]);
-      });
-
-      newSocket.on('reconnect', (attemptNumber) => {
-        window.Utils.log('success', 'FRIENDLYモード Socket.IO再接続成功', { attemptNumber });
-        setConnectionStatus('connected');
-        newSocket.emit('join-space', currentSpace.id);
-        
-        // セッション情報を再送信
-        if (window.SessionManager) {
-          const currentSession = window.SessionManager.getCurrentSession();
-          if (currentSession) {
-            newSocket.emit('session-info', {
-              sessionId: currentSession.sessionId,
-              spaceId: currentSpace.id,
-              timestamp: new Date().toISOString()
-            });
-          }
+        } catch (error) {
+          window.Utils.log('error', 'リアルタイムメッセージ処理エラー', error.message);
         }
       });
 
-      newSocket.on('error', (error) => {
-        window.Utils.log('error', 'FRIENDLYモード Socket.IOエラー', error);
-        setConnectionStatus('disconnected');
-      });
-      
-      newSocket.on('error-response', (data) => {
-        window.Utils.log('error', 'サーバーエラー応答', data);
-        setError(`サーバーエラー: ${data.error}`);
-        
-        setTimeout(() => {
-          setError(prev => prev.includes(data.error) ? '' : prev);
-        }, 5000);
-      });
+      // ErrorHandler との統合
+      if (window.ErrorHandler && window.ErrorHandler.attachSocketErrorHandlers) {
+        window.ErrorHandler.attachSocketErrorHandlers(newSocket);
+      }
 
       setSocket(newSocket);
 
+      // クリーンアップ
       return () => {
-        window.Utils.log('info', 'FRIENDLYモード Socket.IO接続クリーンアップ');
+        window.Utils.log('info', 'Socket.IO統合強化版クリーンアップ');
+        
+        clearInterval(connectionMonitor);
+        
         if (newSocket.connected) {
           newSocket.emit('leave-space', currentSpace.id);
         }
+        
         newSocket.disconnect();
         setConnectionStatus('disconnected');
         setRealtimeUsers([]);
         setTypingUsers([]);
         setKeyExchangeStatus({});
+        
+        // グローバル関数のクリーンアップ
+        delete window.manualReconnect;
       };
     }
   }, [currentSpace]);
@@ -585,12 +649,98 @@ const SecureChatApp = () => {
     setError('');
 
     try {
-      // 暗号化システム準備
-      if (encryptionStatus === 'enabled') {
-        setEncryptionStatus('initializing');
-      }
+      // 🆕 暗号化初期化の段階的リトライ機能
+      const initializeEncryptionWithRetry = async (space, maxRetries = 3) => {
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+          try {
+            setEncryptionStatus('initializing');
+            setEncryptionInfo(prev => ({
+              ...prev,
+              status: `初期化試行中... (${attempt}/${maxRetries})`,
+              attempt: attempt
+            }));
 
-      // FRIENDLYモード対応空間入室
+            const encryptionInitialized = await window.API.initializeEncryption(space.id, space.passphrase);
+            
+            if (encryptionInitialized) {
+              setEncryptionStatus('enabled');
+              setEncryptionInfo(prev => ({
+                ...prev,
+                spaceId: space.id,
+                publicKey: window.Utils.getSafePublicKey(window.API.encryptionSystem?.publicKey),
+                initialized: true,
+                keyType: 'hybrid_deterministic',
+                passphrase: space.passphrase,
+                mode: 'FRIENDLY',
+                capabilities: ['決定的暗号化', 'ハイブリッド暗号化', 'セッション検出', 'フォールバック復号化'],
+                initializationAttempts: attempt,
+                recoveryTime: new Date().toISOString()
+              }));
+              
+              window.Utils.log('success', `暗号化初期化成功 (試行${attempt}回目)`);
+              return true;
+            }
+            
+            throw new Error(`暗号化初期化失敗 (試行${attempt}回目)`);
+            
+          } catch (error) {
+            window.Utils.log('warn', `暗号化初期化失敗 (${attempt}/${maxRetries})`, {
+              error: error.message,
+              attempt,
+              willRetry: attempt < maxRetries
+            });
+            
+            if (attempt === maxRetries) {
+              // 最終試行後の処理
+              setEncryptionStatus('error');
+              setEncryptionInfo(prev => ({
+                ...prev,
+                error: `暗号化初期化に失敗しました (${maxRetries}回試行)`,
+                lastError: error.message,
+                fallbackMode: true,
+                attempts: maxRetries
+              }));
+              
+              // 🆕 エラーリカバリーの選択肢を提供
+              showEncryptionRecoveryOptions(space, error);
+              return false;
+            }
+            
+            // リトライ前の遅延（指数バックオフ）
+            const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
+            await new Promise(resolve => setTimeout(resolve, delay));
+          }
+        }
+        return false;
+      };
+
+      // 🆕 暗号化リカバリーオプション表示
+      const showEncryptionRecoveryOptions = (space, error) => {
+        const recoveryActions = [];
+        
+        if (error.message.includes('passphrase')) {
+          recoveryActions.push('パスフレーズの再確認');
+        }
+        
+        if (error.message.includes('key')) {
+          recoveryActions.push('キーキャッシュのクリア');
+        }
+        
+        if (error.message.includes('network')) {
+          recoveryActions.push('ネットワーク接続の確認');
+        }
+        
+        recoveryActions.push('平文モードで継続');
+        
+        // UIに回復オプションを表示
+        setEncryptionInfo(prev => ({
+          ...prev,
+          recoveryOptions: recoveryActions,
+          showRecoveryUI: true
+        }));
+      };
+
+      // 空間入室処理
       const space = await window.API.enterSpace(validation.passphrase);
       
       // セッション初期化
@@ -607,57 +757,112 @@ const SecureChatApp = () => {
       setCurrentView('chat');
       setPassphrase('');
       
-      // FRIENDLYモード暗号化システム初期化
-      if (window.API.encryptionSystem || encryptionStatus === 'initializing') {
-        setEncryptionStatus('enabled');
-        setEncryptionInfo(prev => ({
-          ...prev,
-          spaceId: space.id,
-          publicKey: window.Utils.getSafePublicKey(window.API.encryptionSystem?.publicKey),
-          initialized: true,
-          keyType: 'hybrid_deterministic',
-          passphrase: space.passphrase,
-          mode: 'FRIENDLY',
-          capabilities: ['決定的暗号化', 'ハイブリッド暗号化', 'セッション検出', 'フォールバック復号化']
-        }));
-        window.Utils.log('success', 'FRIENDLYモード暗号化システム確認完了');
-      } else if (encryptionStatus === 'initializing') {
-        setEncryptionStatus('disabled');
-        window.Utils.log('warn', 'FRIENDLYモード暗号化システム初期化失敗');
+      // 🆕 強化された暗号化初期化
+      if (encryptionStatus === 'enabled' || encryptionStatus === 'disabled') {
+        const encryptionSuccess = await initializeEncryptionWithRetry(space);
+        
+        if (!encryptionSuccess) {
+          // 暗号化失敗でも継続可能
+          window.Utils.log('warn', '暗号化無しで継続します');
+          setError('⚠️ 暗号化機能が利用できませんが、平文モードで継続します');
+          
+          setTimeout(() => {
+            setError('');
+          }, 5000);
+        }
       }
       
-      // FRIENDLYモード対応メッセージ読み込み
+      // メッセージ読み込み（FRIENDLYモード対応）
       let loadedMessages = [];
-      if (window.API.loadMessagesFriendly) {
-        loadedMessages = await window.API.loadMessagesFriendly(space.id);
-      } else {
-        loadedMessages = await window.API.loadMessages(space.id);
+      try {
+        if (window.API.loadMessagesFriendly) {
+          loadedMessages = await window.API.loadMessagesFriendly(space.id);
+        } else {
+          loadedMessages = await window.API.loadMessages(space.id);
+        }
+        setMessages(loadedMessages);
+      } catch (messageError) {
+        window.Utils.log('error', 'メッセージ読み込みエラー', messageError.message);
+        setError('メッセージの読み込みに失敗しましたが、新しいメッセージは送信できます');
+        
+        setTimeout(() => {
+          setError('');
+        }, 3000);
       }
-      setMessages(loadedMessages);
       
       window.Utils.log('success', 'FRIENDLYモード空間入室完了', { 
         spaceId: space.id, 
         messageCount: loadedMessages.length,
-        encryptedCount: loadedMessages.filter(m => m.encrypted).length,
-        hybridCount: loadedMessages.filter(m => m.encryptionType === 'hybrid').length,
-        deterministicCount: loadedMessages.filter(m => m.encryptionType === 'deterministic').length,
-        encryptionEnabled: !!window.API.encryptionSystem
+        encryptionEnabled: encryptionStatus === 'enabled'
       });
       
     } catch (error) {
       const errorMessage = window.Utils.handleError(error, 'FRIENDLYモード空間入室処理');
       setError(errorMessage);
       
-      if (encryptionStatus === 'initializing') {
-        setEncryptionStatus('error');
-        setEncryptionInfo(prev => ({
-          ...prev,
-          error: errorMessage
-        }));
+      // 🆕 重大エラーの場合の回復処理
+      if (error.message.includes('network') || error.message.includes('server')) {
+        // ネットワークエラーの場合のフォールバック
+        setError(prev => prev + '\n\n🔄 ネットワーク接続を確認して再試行してください');
+        
+        // 自動再接続の準備
+        setTimeout(() => {
+          if (window.API.testConnection) {
+            window.API.testConnection().then(connected => {
+              if (connected) {
+                setError('✅ 接続が復旧しました。再度お試しください');
+                setTimeout(() => setError(''), 3000);
+              }
+            });
+          }
+        }, 5000);
       }
+      
     } finally {
       setIsLoading(false);
       window.Utils.performance.end('enter_space_friendly');
+    }
+  };
+
+  // 🆕 暗号化リカバリー実行関数
+  const executeEncryptionRecovery = async (action, space) => {
+    setIsLoading(true);
+    setError('');
+    
+    try {
+      switch (action) {
+        case 'clearKeyCache':
+          if (window.Crypto?.cleanupAllKeys) {
+            window.Crypto.cleanupAllKeys();
+            window.Utils.log('info', 'キーキャッシュをクリアしました');
+          }
+          break;
+          
+        case 'retryEncryption':
+          await window.API.initializeEncryption(space.id, space.passphrase);
+          break;
+          
+        case 'plaintextMode':
+          setEncryptionStatus('disabled');
+          setEncryptionInfo({
+            supported: false,
+            mode: 'plaintext',
+            reason: 'ユーザー選択',
+            manualDisable: true
+          });
+          break;
+      }
+      
+      setEncryptionInfo(prev => ({
+        ...prev,
+        showRecoveryUI: false,
+        recoveryOptions: null
+      }));
+      
+    } catch (error) {
+      setError(`回復処理に失敗しました: ${error.message}`);
+    } finally {
+      setIsLoading(false);
     }
   };
 
