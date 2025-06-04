@@ -123,63 +123,26 @@ const SecureChatApp = () => {
           lastUpdate: new Date()
         });
 
-        // 🔧 Action 1.2: 暗号化情報の更新（修正版）
+        // 暗号化情報の更新
         if (encryptionStatus === 'enabled') {
-          const newEncryptionLevel = activeSessions.length > 1 ? 'hybrid' : 'deterministic';
-          
-          setEncryptionInfo(prev => {
-            // 🆕 暗号化レベル変更の通知（setEncryptionInfo内で処理）
-            if (prev && prev.encryptionLevel && prev.encryptionLevel !== newEncryptionLevel) {
-              window.Utils.log('info', '🔄 暗号化レベル変更', {
-                from: prev.encryptionLevel,
-                to: newEncryptionLevel,
-                sessionCount: activeSessions.length
-              });
-            }
-            
-            return {
-              ...prev,
-              sessionCount: activeSessions.length,
-              encryptionLevel: newEncryptionLevel,
-              spaceId: currentSpace.id,
-              lastUpdate: new Date(),
-              realTimeStatus: `${newEncryptionLevel}暗号化 (${activeSessions.length}セッション)`,
-              capabilities: newEncryptionLevel === 'hybrid' ? 
-                ['ハイブリッド暗号化', 'セッション暗号化', 'フォールバック復号化'] : 
-                ['決定的暗号化', 'パスフレーズベース', 'フォールバック復号化'],
-              displayText: newEncryptionLevel === 'hybrid' ? 
-                `🔗 ハイブリッド暗号化 (${activeSessions.length}セッション)` :
-                '🔑 決定的暗号化 (単独セッション)',
-              performanceNote: newEncryptionLevel === 'hybrid' ? 
-                'セキュリティ強化済み' : 'パフォーマンス最適化'
-            };
-          });
+          setEncryptionInfo(prev => ({
+            ...prev,
+            sessionCount: activeSessions.length,
+            encryptionLevel: activeSessions.length > 1 ? 'hybrid' : 'deterministic',
+            spaceId: currentSpace.id
+          }));
         }
       };
 
       // 初回更新
       updateSessionInfo();
 
-      // 🔧 Action 1.2: 更新頻度を5秒に短縮
-      const sessionUpdateInterval = setInterval(updateSessionInfo, 5000);
+      // 定期更新（10秒ごと）
+      const sessionUpdateInterval = setInterval(updateSessionInfo, 10000);
 
       return () => clearInterval(sessionUpdateInterval);
     }
   }, [currentSpace, encryptionStatus]);
-
-  // 🆕 Action 1.2で追加: 暗号化状態変更専用エフェクト（簡略版）
-  useEffect(() => {
-    if (currentSpace && encryptionStatus === 'enabled' && sessionCount > 0) {
-      // セッション数変更時のリアルタイム表示更新
-      const currentLevel = sessionCount > 1 ? 'hybrid' : 'deterministic';
-      
-      window.Utils.log('debug', '🔄 セッション状態更新', {
-        spaceId: currentSpace.id,
-        sessionCount,
-        encryptionLevel: currentLevel
-      });
-    }
-  }, [currentSpace, sessionCount, encryptionStatus]);
 
   // =============================================================================
   // パフォーマンス監視エフェクト
@@ -283,6 +246,30 @@ const SecureChatApp = () => {
           }
         }
       });
+
+      // 暗号化状態エフェクト強化
+      useEffect(() => {
+        if (currentSpace && encryptionStatus === 'enabled') {
+          const updateEncryptionDisplay = () => {
+            const activeSessions = window.SessionManager.getActiveSessionsForSpace(currentSpace.id);
+            const newEncryptionLevel = activeSessions.length > 1 ? 'hybrid' : 'deterministic';
+            
+            setEncryptionInfo(prev => ({
+              ...prev,
+              encryptionLevel: newEncryptionLevel,
+              sessionCount: activeSessions.length,
+              lastUpdate: new Date()
+            }));
+          };
+          
+          // 初回更新
+          updateEncryptionDisplay();
+          
+          // 定期更新
+          const interval = setInterval(updateEncryptionDisplay, 5000);
+          return () => clearInterval(interval);
+        }
+      }, [currentSpace, sessionCount, encryptionStatus]);
 
       // セッション管理イベント
       newSocket.on('session-joined', (data) => {
