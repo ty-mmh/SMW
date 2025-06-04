@@ -1,169 +1,158 @@
 // server.js - FRIENDLYモード Socket.IO統合サーバー
-// セッション管理、暗号化レベル同期、リアルタイム通信
-
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
+const cors = require('cors');
 const path = require('path');
-const Database = require('better-sqlite3');
 
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
-    origin: process.env.NODE_ENV === 'production' ? false : ["http://localhost:3000"],
+    origin: "http://localhost:3000",
     methods: ["GET", "POST"]
-  },
-  transports: ['websocket', 'polling'],
-  pingTimeout: 60000,
-  pingInterval: 25000
+  }
 });
 
-// データベース初期化
-const db = new Database('securechat.db');
-
-// ミドルウェア設定
-app.use(express.json());
+// 静的ファイルの提供
 app.use(express.static('public'));
+app.use(express.json());
+app.use(cors());
 
-// セッション管理
-const activeSessions = new Map(); // spaceId -> Map<sessionId, socketInfo>
-const socketToSession = new Map(); // socketId -> { sessionId, spaceId }
-const sessionHeartbeats = new Map(); // sessionId -> lastActivity
+// データベース初期化（SQLite）
+const Database = require('better-sqlite3');
+const db = new Database('secure_chat.db');
 
-// ルート設定
+// テーブル作成
+db.exec(`
+  CREATE TABLE IF NOT EXISTS spaces (
+    id TEXT PRIMARY KEY,
+    passphrase TEXT UNIQUE NOT NULL,
+    created_at TEXT NOT NULL,
+    last_activity_at TEXT NOT NULL
+  );
+  
+  CREATE TABLE IF NOT EXISTS messages (
+    id TEXT PRIMARY KEY,
+    space_id TEXT NOT NULL,
+    encrypted_content TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    is_deleted INTEGER DEFAULT 0,
+    encrypted INTEGER DEFAULT 0,
+    encrypted_payload TEXT,
+    FOREIGN KEY (space_id) REFERENCES spaces(id)
+  );
+`);
+
+// サンプル空間作成
+try {
+  db.prepare(`
+    INSERT OR IGNORE INTO spaces (id, passphrase, created_at, last_activity_at)
+    VALUES (?, ?, ?, ?)
+  `).run('sample-space-001', '秘密の部屋', new Date().toISOString(), new Date().toISOString());
+} catch (error) {
+  console.log('サンプル空間は既に存在します');
+}
+
+// ルーター設定
 const spacesRouter = require('./routes/spaces')(db);
 const messagesRouter = require('./routes/messages')(db);
 
 app.use('/api/spaces', spacesRouter);
 app.use('/api/messages', messagesRouter);
 
-// ヘルスチェック
-app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'OK',
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development',
-    database: 'connected',
-    sockets: io.engine.clientsCount,
-    activeSessions: activeSessions.size
-  });
-});
+// =============================================================================
+// FRIENDLYモード Socket.IO統合強化版
+// =============================================================================
 
-// =============================================================================
-// Socket.IO統合イベントハンドリング
-// =============================================================================
+// セッション管理
+const activeSessions = new Map(); // spaceId -> Set<sessionInfo>
+const sessionToSpace = new Map(); // socketId -> spaceId
+const sessionActivity = new Map(); // sessionId -> lastActivity
 
 io.on('connection', (socket) => {
-  console.log(`🔌 Socket.IO接続: ${socket.id}`);
-
-  /**
-   * 空間参加処理
-   */
+  console.log(`🔌 新しい接続: ${socket.id}`);
+  
+  // ===== セッション管理 =====
+  
   socket.on('join-space', (spaceId) => {
-    if (!spaceId) return;
+    console.log(`👥 空間参加: ${socket.id} -> ${spaceId}`);
     
-    console.log(`🏠 空間参加: ${socket.id} -> ${spaceId}`);
     socket.join(spaceId);
+    sessionToSpace.set(socket.id, spaceId);
     
-    // 空間の現在のセッション数を通知
-    const spaceInfo = getSpaceInfo(spaceId);
-    socket.emit('session-count-updated', {
-      spaceId,
-      sessionCount: spaceInfo.sessionCount,
-      encryptionLevel: spaceInfo.encryptionLevel,
-      reason: 'joined_space'
-    });
-  });
-
-  /**
-   * セッション情報登録
-   */
-  socket.on('session-info', (data) => {
-    if (!data.sessionId || !data.spaceId) return;
-    
-    console.log(`👤 セッション登録: ${data.sessionId.substring(0, 12)}... -> ${data.spaceId}`);
-    
-    // セッション情報の保存
-    if (!activeSessions.has(data.spaceId)) {
-      activeSessions.set(data.spaceId, new Map());
+    // アクティブセッションに追加
+    if (!activeSessions.has(spaceId)) {
+      activeSessions.set(spaceId, new Set());
     }
+    activeSessions.get(spaceId).add(socket.id);
     
-    const spaceSessions = activeSessions.get(data.spaceId);
-    spaceSessions.set(data.sessionId, {
-      socketId: socket.id,
-      joinedAt: new Date(),
-      lastActivity: new Date(),
-      isRecovering: data.recoveryMode || false,
-      connectionStats: data.connectionStats || {}
+    // セッション数を他のクライアントに通知
+    const sessionCount = activeSessions.get(spaceId).size;
+    socket.to(spaceId).emit('session-count-updated', {
+      spaceId,
+      sessionCount,
+      encryptionLevel: sessionCount > 1 ? 'hybrid' : 'deterministic',
+      reason: 'user_joined'
     });
     
-    // ソケットとセッションの関連付け
-    socketToSession.set(socket.id, {
-      sessionId: data.sessionId,
-      spaceId: data.spaceId
-    });
-    
-    // セッション活性度管理
-    sessionHeartbeats.set(data.sessionId, new Date());
-    
-    // 他のクライアントにセッション参加を通知
-    socket.to(data.spaceId).emit('session-joined', {
-      sessionId: data.sessionId,
-      spaceId: data.spaceId,
+    // セッション参加を通知
+    socket.to(spaceId).emit('session-joined', {
+      sessionId: socket.id,
+      spaceId,
       timestamp: new Date().toISOString()
     });
-    
-    // 暗号化レベル更新
-    updateEncryptionLevel(data.spaceId);
   });
-
-  /**
-   * セッション活性度更新
-   */
-  socket.on('session-activity', (data) => {
-    if (!data.sessionId) return;
-    
-    sessionHeartbeats.set(data.sessionId, new Date());
-    
-    // セッション情報も更新
-    const sessionInfo = socketToSession.get(socket.id);
-    if (sessionInfo && activeSessions.has(sessionInfo.spaceId)) {
-      const spaceSessions = activeSessions.get(sessionInfo.spaceId);
-      const session = spaceSessions.get(data.sessionId);
-      if (session) {
-        session.lastActivity = new Date();
-      }
-    }
+  
+  socket.on('leave-space', (spaceId) => {
+    console.log(`👋 空間退出: ${socket.id} -> ${spaceId}`);
+    handleSessionLeave(socket, spaceId);
   });
-
-  /**
-   * 新しいメッセージの配信
-   */
+  
+  // ===== メッセージング =====
+  
   socket.on('new-message', (data) => {
-    if (!data.spaceId || !data.message) return;
+    console.log(`💬 新メッセージ: ${socket.id} -> ${data.spaceId}`);
     
-    console.log(`💬 新メッセージ配信: ${data.spaceId}`);
-    
-    // 送信者以外に配信
+    // 同じ空間の他のクライアントに配信
     socket.to(data.spaceId).emit('message-received', {
       message: data.message,
-      from: socket.id,
       encryptionInfo: data.encryptionInfo,
-      sessionCount: getSpaceInfo(data.spaceId).sessionCount,
+      sessionCount: activeSessions.get(data.spaceId)?.size || 1,
+      from: socket.id,
       timestamp: new Date().toISOString()
     });
   });
-
-  /**
-   * 暗号化レベル変更通知
-   */
-  socket.on('encryption-level-changed', (data) => {
-    if (!data.spaceId) return;
+  
+  // ===== セッション活性度管理 =====
+  
+  socket.on('session-info', (data) => {
+    console.log(`📊 セッション情報: ${data.sessionId?.substring(0, 12)}... -> ${data.spaceId}`);
     
+    sessionActivity.set(data.sessionId, {
+      lastActivity: new Date(),
+      spaceId: data.spaceId,
+      socketId: socket.id,
+      isReconnection: data.isReconnection || false
+    });
+  });
+  
+  socket.on('session-activity', (data) => {
+    if (data.notifyOthers !== false) {
+      socket.to(data.spaceId).emit('session-activity-update', {
+        sessionId: data.sessionId,
+        activity: data.activity,
+        timestamp: data.timestamp
+      });
+    }
+  });
+  
+  // ===== 暗号化レベル管理 =====
+  
+  socket.on('encryption-level-changed', (data) => {
     console.log(`🔒 暗号化レベル変更: ${data.spaceId} -> ${data.encryptionLevel}`);
     
-    // 他のクライアントに通知
     socket.to(data.spaceId).emit('encryption-level-updated', {
       spaceId: data.spaceId,
       encryptionLevel: data.encryptionLevel,
@@ -172,212 +161,143 @@ io.on('connection', (socket) => {
       timestamp: data.timestamp
     });
   });
-
-  /**
-   * Ping-Pong（接続品質確認）
-   */
+  
+  // ===== キー交換システム =====
+  
+  socket.on('public-key-announcement', (data) => {
+    console.log(`🔑 公開鍵通知: ${data.sessionId?.substring(0, 12)}... -> ${data.spaceId}`);
+    
+    socket.to(data.spaceId).emit('public-key-received', {
+      sessionId: data.sessionId,
+      spaceId: data.spaceId,
+      publicKey: data.publicKey,
+      timestamp: data.timestamp,
+      purpose: data.purpose
+    });
+  });
+  
+  socket.on('key-exchange-request', (data) => {
+    console.log(`🔄 キー交換要求: ${data.sessionId?.substring(0, 12)}... -> ${data.spaceId}`);
+    
+    if (data.targetSessionId) {
+      // 特定のセッションに送信
+      socket.to(data.spaceId).emit('key-exchange-request', data);
+    } else {
+      // 空間の全セッションに送信
+      socket.to(data.spaceId).emit('key-exchange-request', data);
+    }
+  });
+  
+  socket.on('key-exchange-response', (data) => {
+    console.log(`✅ キー交換応答: ${data.sessionId?.substring(0, 12)}... -> ${data.spaceId}`);
+    
+    socket.to(data.spaceId).emit('key-exchange-response', data);
+  });
+  
+  socket.on('key-verification-request', (data) => {
+    socket.to(data.spaceId).emit('key-verification-request', data);
+  });
+  
+  socket.on('key-verification-response', (data) => {
+    socket.to(data.spaceId).emit('key-verification-response', data);
+  });
+  
+  // ===== 接続品質監視 =====
+  
   socket.on('ping', (timestamp) => {
     socket.emit('pong', timestamp);
   });
-
-  /**
-   * タイピング状態通知
-   */
-  socket.on('typing-start', (data) => {
-    if (!data.spaceId) return;
-    socket.to(data.spaceId).emit('user-typing', {
-      sessionId: data.sessionId,
-      spaceId: data.spaceId,
-      isTyping: true
-    });
-  });
-
-  socket.on('typing-stop', (data) => {
-    if (!data.spaceId) return;
-    socket.to(data.spaceId).emit('user-typing', {
-      sessionId: data.sessionId,
-      spaceId: data.spaceId,
-      isTyping: false
-    });
-  });
-
-  /**
-   * 空間退出処理
-   */
-  socket.on('leave-space', (spaceId) => {
-    if (!spaceId) return;
-    
-    console.log(`🚪 空間退出: ${socket.id} -> ${spaceId}`);
-    
-    handleSessionLeave(socket, spaceId);
-    socket.leave(spaceId);
-  });
-
-  /**
-   * 接続切断処理
-   */
+  
+  // ===== 切断処理 =====
+  
   socket.on('disconnect', (reason) => {
-    console.log(`🔌 Socket.IO切断: ${socket.id} (理由: ${reason})`);
+    console.log(`🔌 接続切断: ${socket.id} (${reason})`);
     
-    const sessionInfo = socketToSession.get(socket.id);
-    if (sessionInfo) {
-      handleSessionLeave(socket, sessionInfo.spaceId);
+    const spaceId = sessionToSpace.get(socket.id);
+    if (spaceId) {
+      handleSessionLeave(socket, spaceId);
     }
-    
-    socketToSession.delete(socket.id);
   });
 });
 
-// =============================================================================
-// ヘルパー関数
-// =============================================================================
-
-/**
- * 空間情報取得
- */
-function getSpaceInfo(spaceId) {
-  const spaceSessions = activeSessions.get(spaceId);
-  const sessionCount = spaceSessions ? spaceSessions.size : 0;
-  const encryptionLevel = sessionCount > 1 ? 'hybrid' : 'deterministic';
-  
-  return {
-    sessionCount,
-    encryptionLevel,
-    activeSessions: spaceSessions ? Array.from(spaceSessions.keys()) : []
-  };
-}
-
-/**
- * 暗号化レベル更新
- */
-function updateEncryptionLevel(spaceId) {
-  const spaceInfo = getSpaceInfo(spaceId);
-  
-  // 空間の全クライアントに通知
-  io.to(spaceId).emit('session-count-updated', {
-    spaceId,
-    sessionCount: spaceInfo.sessionCount,
-    encryptionLevel: spaceInfo.encryptionLevel,
-    reason: 'session_change',
-    timestamp: new Date().toISOString()
-  });
-  
-  console.log(`🔄 暗号化レベル更新: ${spaceId} -> ${spaceInfo.encryptionLevel} (${spaceInfo.sessionCount}セッション)`);
-}
-
-/**
- * セッション退出処理
- */
+// セッション退出処理
 function handleSessionLeave(socket, spaceId) {
-  const sessionInfo = socketToSession.get(socket.id);
-  if (!sessionInfo) return;
-  
-  const { sessionId } = sessionInfo;
-  
-  // アクティブセッションから削除
-  const spaceSessions = activeSessions.get(spaceId);
-  if (spaceSessions && spaceSessions.has(sessionId)) {
-    spaceSessions.delete(sessionId);
+  const sessions = activeSessions.get(spaceId);
+  if (sessions) {
+    sessions.delete(socket.id);
     
-    // 空間が空になった場合は削除
-    if (spaceSessions.size === 0) {
-      activeSessions.delete(spaceId);
-    }
-    
-    // セッション活性度管理からも削除
-    sessionHeartbeats.delete(sessionId);
-    
-    // 他のクライアントにセッション退出を通知
+    // セッション退出を通知
     socket.to(spaceId).emit('session-left', {
-      sessionId,
+      sessionId: socket.id,
       spaceId,
       timestamp: new Date().toISOString()
     });
     
-    // 暗号化レベル更新
-    updateEncryptionLevel(spaceId);
+    // セッション数更新を通知
+    const sessionCount = sessions.size;
+    socket.to(spaceId).emit('session-count-updated', {
+      spaceId,
+      sessionCount,
+      encryptionLevel: sessionCount > 1 ? 'hybrid' : 'deterministic',
+      reason: 'user_left'
+    });
     
-    console.log(`👤 セッション退出: ${sessionId.substring(0, 12)}... -> ${spaceId}`);
-  }
-}
-
-// =============================================================================
-// 定期的なメンテナンス
-// =============================================================================
-
-/**
- * 非アクティブセッションのクリーンアップ
- */
-setInterval(() => {
-  const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
-  const inactiveSessions = [];
-  
-  for (const [sessionId, lastActivity] of sessionHeartbeats) {
-    if (lastActivity < fiveMinutesAgo) {
-      inactiveSessions.push(sessionId);
+    if (sessions.size === 0) {
+      activeSessions.delete(spaceId);
     }
   }
   
-  if (inactiveSessions.length > 0) {
-    console.log(`🗑️ 非アクティブセッションをクリーンアップ: ${inactiveSessions.length}件`);
-    
-    inactiveSessions.forEach(sessionId => {
-      sessionHeartbeats.delete(sessionId);
-      
-      // 対応する空間セッションも削除
-      for (const [spaceId, spaceSessions] of activeSessions) {
-        if (spaceSessions.has(sessionId)) {
-          spaceSessions.delete(sessionId);
-          
-          // 暗号化レベル更新通知
-          updateEncryptionLevel(spaceId);
-          
-          if (spaceSessions.size === 0) {
-            activeSessions.delete(spaceId);
-          }
-        }
-      }
-    });
+  sessionToSpace.delete(socket.id);
+  
+  // セッション活性度管理からも削除
+  for (const [sessionId, activity] of sessionActivity) {
+    if (activity.socketId === socket.id) {
+      sessionActivity.delete(sessionId);
+    }
   }
-}, 60000); // 1分ごと
+  
+  socket.leave(spaceId);
+}
 
-/**
- * 統計情報API
- */
-app.get('/api/stats', (req, res) => {
-  const stats = {
-    connections: io.engine.clientsCount,
-    totalSessions: sessionHeartbeats.size,
-    activeSpaces: activeSessions.size,
-    spaceDetails: {}
-  };
-  
-  for (const [spaceId, spaceSessions] of activeSessions) {
-    stats.spaceDetails[spaceId] = {
-      sessionCount: spaceSessions.size,
-      encryptionLevel: spaceSessions.size > 1 ? 'hybrid' : 'deterministic'
-    };
-  }
-  
+// 健康チェックエンドポイント
+app.get('/api/health', (req, res) => {
   res.json({
-    success: true,
-    stats,
+    status: 'OK',
+    environment: process.env.NODE_ENV || 'development',
+    database: 'SQLite',
+    socketConnections: io.engine.clientsCount,
+    activeSpaces: activeSessions.size,
     timestamp: new Date().toISOString()
   });
 });
 
-// サーバー起動
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`🚀 FRIENDLYモード Socket.IO統合サーバー起動: http://localhost:${PORT}`);
-  console.log(`📋 使用可能エンドポイント:`);
-  console.log(`  • GET  /api/health - ヘルスチェック`);
-  console.log(`  • GET  /api/stats  - 統計情報`);
-  console.log(`  • POST /api/spaces/enter - 空間入室`);
-  console.log(`  • POST /api/spaces/create - 空間作成`);
-  console.log(`  • POST /api/messages/create - メッセージ送信`);
-  console.log(`  • GET  /api/messages/:spaceId - メッセージ取得`);
-  console.log(`🔌 Socket.IO リアルタイム通信対応`);
+// 統計エンドポイント（開発環境のみ）
+app.get('/api/stats', (req, res) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(403).json({ error: 'Statistics not available in production' });
+  }
+  
+  res.json({
+    stats: {
+      socketConnections: io.engine.clientsCount,
+      activeSpaces: activeSessions.size,
+      totalActiveSessions: Array.from(activeSessions.values()).reduce((sum, sessions) => sum + sessions.size, 0),
+      sessionActivity: sessionActivity.size,
+      spaceSessionCounts: Object.fromEntries(
+        Array.from(activeSessions.entries()).map(([spaceId, sessions]) => [spaceId, sessions.size])
+      )
+    }
+  });
 });
 
-module.exports = { app, server, io };
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`🚀 FRIENDLYモード Socket.IO統合サーバー起動 - ポート ${PORT}`);
+  console.log(`📡 WebSocket URL: http://localhost:${PORT}`);
+  console.log(`🔒 FRIENDLYモード機能:`);
+  console.log(`   • 決定的暗号化 (単独セッション)`);
+  console.log(`   • ハイブリッド暗号化 (複数セッション)`);
+  console.log(`   • リアルタイムキー交換`);
+  console.log(`   • セッション管理`);
+  console.log(`   • パフォーマンス監視`);
+});
