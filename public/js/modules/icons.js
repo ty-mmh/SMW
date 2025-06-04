@@ -159,7 +159,20 @@ window.Icons = {
     strokeLinejoin: 'round',
     strokeWidth: 2,
     d: 'M12 19l9 2-9-18-9 18 9-2zm0 0v-8'
-  }))
+  })),
+
+  Info: ({ className = 'w-4 h-4' } = {}) => React.createElement('svg', {
+    className,
+    fill: 'none',
+    stroke: 'currentColor',
+    viewBox: '0 0 24 24',
+    'aria-hidden': 'true'
+  }, React.createElement('path', {
+    strokeLinecap: 'round',
+    strokeLinejoin: 'round',
+    strokeWidth: 2,
+    d: 'M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z'
+  })),
 };
 
 // デバッグ用: アイコンの読み込み確認

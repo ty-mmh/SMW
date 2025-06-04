@@ -965,7 +965,15 @@ Object.assign(window.Crypto, {
       
       const testSpaceId = 'test-friendly-' + Date.now();
       const testMessage = 'FRIENDLYモード暗号化テストメッセージ 🔒✨';
+      const testPassphrase = 'test-friendly-pass-' + Date.now(); // テストごとにユニークなパスフレーズが良いでしょう
       const results = [];
+      
+      // ===== ここから追加 =====
+      // テスト用の空間キーを初期化
+      await window.Crypto.getOrCreateSpaceKey(testSpaceId, testPassphrase);
+      results.push(`✅ テスト用空間キー生成 (${testSpaceId})`);
+      window.Utils.log('debug', `テスト用空間キー生成完了: ${testSpaceId}`);
+      // ===== ここまで追加 =====
       
       // セッション初期化
       const sessionId = window.SessionManager.initializeSession(testSpaceId);
@@ -980,7 +988,14 @@ Object.assign(window.Crypto, {
       
       // Test 2: マルチセッション暗号化
       window.Utils.log('debug', 'Test 2: マルチセッション暗号化');
+      // 注意: activeSessionsの操作はSessionManagerの責務なので、ここではSessionManagerのAPI経由で操作するか、
+      // もしSessionManagerにそのようなAPIがなければ、テストの前提としてSessionManagerの状態を直接操作します。
+      // ここでは、テストの簡略化のため直接操作していると仮定します。
+      // より厳密には、SessionManagerにテスト用のセッション追加・削除APIを設けるか、
+      // Socket.IOイベントをシミュレートしてセッション数を変更する方が望ましいです。
+      const originalSessions = window.SessionManager.activeSessions.get(testSpaceId) || new Set();
       window.SessionManager.activeSessions.set(testSpaceId, new Set([sessionId, 'session_test_2', 'session_test_3']));
+      
       const multiEncrypted = await window.Crypto.encryptMessageHybrid(testMessage, testSpaceId);
       const multiDecrypted = await window.Crypto.decryptMessageWithFallback(multiEncrypted, testSpaceId);
       const multiSuccess = testMessage === multiDecrypted;
@@ -988,13 +1003,15 @@ Object.assign(window.Crypto, {
       
       // Test 3: フォールバックテスト
       window.Utils.log('debug', 'Test 3: フォールバックテスト');
-      window.SessionManager.activeSessions.set(testSpaceId, new Set(['different_session_id'])); // 異なるセッション
+      window.SessionManager.activeSessions.set(testSpaceId, new Set(['different_session_id'])); // 意図的に異なるセッションIDを設定
       const fallbackDecrypted = await window.Crypto.decryptMessageWithFallback(multiEncrypted, testSpaceId);
       const fallbackSuccess = testMessage === fallbackDecrypted;
       results.push(`${fallbackSuccess ? '✅' : '❌'} フォールバック: ${fallbackSuccess}`);
       
       // クリーンアップ
       window.SessionManager.leaveSession(testSpaceId);
+      window.Crypto.forceCleanupSpaceKey(testSpaceId); // テストで生成したキーをクリーンアップ
+      results.push(`✅ テスト用空間キークリーンアップ (${testSpaceId})`);
       
       const allSuccess = results.every(r => r.startsWith('✅'));
       
@@ -1003,8 +1020,8 @@ Object.assign(window.Crypto, {
         message: allSuccess ? '🎉 全テスト成功！' : '⚠️ 一部テスト失敗',
         details: results,
         testData: {
-          singleEncrypted: singleEncrypted.type,
-          multiEncrypted: multiEncrypted.type,
+          singleEncryptedType: singleEncrypted.type,
+          multiEncryptedType: multiEncrypted.type,
           hasFallback: !!multiEncrypted.fallbackData
         }
       };
@@ -1017,6 +1034,7 @@ Object.assign(window.Crypto, {
         success: false,
         message: '❌ テスト実行エラー',
         error: error.message,
+        stack: error.stack, // エラーのスタックトレースも記録するとデバッグに役立ちます
         details: []
       };
       
