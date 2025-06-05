@@ -307,6 +307,60 @@ const SecureChatApp = () => {
         if (isReconnect) {
             restoreSessionState(newSocket);
         }
+        if (window.KeyExchangeManager && encryptionStatus === 'enabled') {
+          const initKeyExchange = async () => {
+            try {
+              // 既存の交換状態をクリア（再接続時）
+              if (isReconnect) {
+                window.KeyExchangeManager.cleanup(currentSpace.id);
+              }
+              
+              // 初期化
+              const initialized = window.KeyExchangeManager.initialize(newSocket, currentSpace.id);
+              if (!initialized) {
+                throw new Error('KeyExchangeManager初期化失敗');
+              }
+              
+              // イベントリスナー設定
+              window.KeyExchangeManager.addKeyExchangeListener((event) => {
+                // UIへの反映
+                setKeyExchangeStatus(window.KeyExchangeManager.getKeyExchangeStatus(currentSpace.id));
+                
+                // 暗号化情報の更新
+                if (event.type === 'exchange_complete') {
+                  setEncryptionInfo(prev => ({
+                    ...prev,
+                    keyExchangeComplete: true,
+                    peerCount: event.peerCount,
+                    lastKeyExchange: new Date()
+                  }));
+                }
+              });
+              
+              // 初回キー交換の開始（少し遅延）
+              setTimeout(() => {
+                window.KeyExchangeManager.initiateKeyExchange(newSocket, currentSpace.id);
+              }, isReconnect ? 2000 : 1000); // 再接続時は長めの遅延
+              
+            } catch (error) {
+              window.Utils.log('error', 'キー交換初期化エラー', error);
+              if (window.UnifiedErrorDisplay) {
+                window.UnifiedErrorDisplay.addError({
+                  id: `key_exchange_init_${Date.now()}`,
+                  type: 'key_exchange_error',
+                  category: 'encryption',
+                  severity: 'medium',
+                  title: 'キー交換初期化エラー',
+                  message: 'セキュアな通信の確立に失敗しました',
+                  autoRecover: true,
+                  persistent: false
+                });
+              }
+            }
+          };
+          
+          initKeyExchange();
+        }
       };
 
       // ベース版の高度な自動復旧処理
@@ -634,6 +688,70 @@ const SecureChatApp = () => {
         delete window.manualReconnect; // グローバル関数クリーンアップ
 
         // MemoryPerformanceManager で管理されているリソースもここで解放されるべき (各useEffect内で定義)
+      };
+      const setupSocketEventHandlers = (socket, currentSpace) => {
+        // 統合イベントハンドラー
+        const eventHandlers = {
+          // セッション関連
+          'session-joined': (data) => {
+            window.SessionRealtimeSync?.handleSessionChange('join', data, socket);
+          },
+          'session-left': (data) => {
+            window.SessionRealtimeSync?.handleSessionChange('leave', data, socket);
+          },
+          
+          // 暗号化レベル変更
+          'encryption-level-changed': (data) => {
+            if (data.spaceId === currentSpace.id) {
+              setEncryptionInfo(prev => ({
+                ...prev,
+                remoteLevel: data.encryptionLevel,
+                remoteSessionCount: data.sessionCount,
+                levelMismatch: prev.encryptionLevel !== data.encryptionLevel
+              }));
+            }
+          },
+          
+          // エラー通知
+          'error-broadcast': (data) => {
+            if (window.UnifiedErrorDisplay) {
+              window.UnifiedErrorDisplay.addError({
+                ...data,
+                source: 'server',
+                autoRecover: true
+              });
+            }
+          },
+          
+          // 同期状態確認
+          'sync-check': (data) => {
+            window.SessionRealtimeSync?.verifySyncState(socket, currentSpace.id);
+          }
+        };
+
+        // イベントリスナー登録
+        Object.entries(eventHandlers).forEach(([event, handler]) => {
+          socket.on(event, handler);
+        });
+
+        // 定期的な同期チェック
+        const syncInterval = setInterval(() => {
+          if (socket.connected) {
+            socket.emit('heartbeat', {
+              spaceId: currentSpace.id,
+              sessionId: window.SessionManager?.getCurrentSession()?.sessionId,
+              timestamp: new Date().toISOString()
+            });
+          }
+        }, 30000);
+
+        // クリーンアップ関数
+        return () => {
+          clearInterval(syncInterval);
+          Object.entries(eventHandlers).forEach(([event]) => {
+            socket.off(event);
+          });
+        };
       };
     }
   }, [currentSpace, encryptionStatus, sessionCount]); // sessionCountの変更で暗号化レベルが変わるため、socket再接続や再設定が必要な場合があるか検討。
